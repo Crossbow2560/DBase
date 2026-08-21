@@ -1,0 +1,91 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-dbase_session}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
+      DEFAULT_USER_QUOTA_BYTES: ${DEFAULT_USER_QUOTA_BYTES:-5368709120}
+      PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
+      PORT: "3000"
+      # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
+      # IMPLEMENTATION_PHASES.md Subcomponent 1) that will actually talk to MinIO isn't built.
+      # Present now so the container topology and secrets are already in place when it is.
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: dbase
+      # Distinct from MINIO_ENDPOINT above (src/config.ts's minio.publicEndpoint comment): that
+      # one is the Docker-internal service name the backend uses to actually reach MinIO, which
+      # is meaningless to a real browser. This is the host a browser can reach MinIO's S3 API on
+      # to actually load a presigned URL — defaults to this machine's own address since MinIO's
+      # port 9000 is published to the host below. Set to this server's real public
+      # domain/IP for a non-local deployment.
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost}
+      MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-9000}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      # MUST be a build arg, not (only) a runtime environment var: next.config.js's rewrites()
+      # is evaluated once at `next build` time (see web/Dockerfile and web/next.config.js's
+      # comments — this was a real bug, found by running the built container). The default in
+      # web/Dockerfile already matches this compose topology, so this line is mostly
+      # documentation of *why* the image is only correct in this specific topology, but it's
+      # made explicit rather than relying on the Dockerfile default silently matching by luck.
+      args:
+        BACKEND_URL: http://backend:3000
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: ensures the app's bucket exists, then exits. `depends_on: service_healthy` on the
+  # other services only waits for minio to be *up*, not for this bucket to exist — nothing
+  # currently reads from the bucket yet (see the backend's MINIO_* comment above), so no service
+  # depends on minio-init completing. Wire that dependency in once the storage module lands.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/dbase
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+volumes:
+  minio-data:

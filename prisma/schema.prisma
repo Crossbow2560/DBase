@@ -1,0 +1,372 @@
+// This schema currently models Subcomponent 0 (users, sessions, password_reset_tokens),
+// Subcomponent 1 (folders, files, upload_sessions, upload_session_parts), Subcomponent 2
+// (permissions, effective_permissions, share_links), and Subcomponent 3 (deletion_queue) — the
+// slice of the database this application actually uses so far. The other tables already exist
+// in Supabase (supabase/migrations/) but aren't modeled here yet.
+//
+// permissions.owner_scope (0003's generated column backing the deferrable one-owner-per-item
+// constraint) is deliberately NOT modeled here — it's DB-managed (GENERATED ALWAYS), the app
+// never reads or writes it directly, and Prisma has no need to know about a column it never
+// touches.
+//
+// IMPORTANT: supabase/migrations/*.sql is the source of truth for DDL — deferrable constraints,
+// generated columns, and the guard/quota triggers are things Prisma's own migration engine
+// doesn't understand. Never run `prisma migrate dev` / `prisma db push` against this database.
+// As later subcomponents are built, extend this file by running `npm run prisma:pull` (needs
+// DIRECT_URL configured in .env) and reconciling the introspected result with this file's
+// field-naming style below, rather than hand-editing table-by-table.
+
+generator client {
+  provider      = "prisma-client-js"
+  // "native" for local (Windows) dev; "debian-openssl-3.0.x" for the Docker runtime image —
+  // installing ffmpeg/poppler-utils in the runtime stage (Subcomponent 5, Dockerfile) pulled in
+  // a libssl3 upgrade that shifted the detected OpenSSL ABI away from what the engine binary
+  // generated in the `deps` stage was resolved for, so the query engine failed to load at
+  // container startup until this target was added explicitly.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum user_role {
+  user
+  admin
+}
+
+model users {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email               String    @unique
+  password_hash       String
+  display_name        String
+  role                user_role @default(user)
+  storage_quota_bytes BigInt    @default(0)
+  storage_used_bytes  BigInt    @default(0)
+  is_active           Boolean   @default(true)
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @db.Timestamptz(6)
+
+  sessions              sessions[]
+  password_reset_tokens password_reset_tokens[]
+  owned_folders         folders[]        @relation("folder_owner")
+  owned_files           files[]          @relation("file_owner")
+  upload_sessions       upload_sessions[]
+  permissions           permissions[]
+  effective_permissions effective_permissions[]
+  created_share_links   share_links[]
+  favorites             favorites[]
+  tags                  tags[]
+}
+
+enum upload_status {
+  pending
+  complete
+}
+
+enum thumbnail_status {
+  none
+  pending
+  ready
+  failed
+}
+
+enum upload_session_status {
+  pending
+  complete
+  aborted
+}
+
+model folders {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  owner_id          String    @db.Uuid
+  parent_folder_id  String?   @db.Uuid
+  materialized_path String
+  created_at        DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime  @default(now()) @db.Timestamptz(6)
+  deleted_at        DateTime? @db.Timestamptz(6)
+
+  owner        users              @relation("folder_owner", fields: [owner_id], references: [id])
+  parent       folders?           @relation("folder_tree", fields: [parent_folder_id], references: [id])
+  children     folders[]          @relation("folder_tree")
+  files        files[]
+  targeted_by  upload_sessions[]  @relation("upload_target_folder")
+
+  @@index([owner_id])
+  @@index([parent_folder_id])
+}
+
+model files {
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name             String
+  owner_id         String            @db.Uuid
+  folder_id        String?           @db.Uuid
+  size_bytes       BigInt            @default(0)
+  mime_type        String
+  checksum         String?
+  storage_key      String            @unique
+  upload_status    upload_status     @default(pending)
+  thumbnail_status thumbnail_status  @default(none)
+  thumbnail_key    String?
+  created_at       DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime          @default(now()) @db.Timestamptz(6)
+  deleted_at       DateTime?         @db.Timestamptz(6)
+
+  owner           users             @relation("file_owner", fields: [owner_id], references: [id])
+  folder          folders?          @relation(fields: [folder_id], references: [id])
+  upload_sessions upload_sessions[]
+  thumbnail_queue thumbnail_queue[]
+
+  @@index([owner_id])
+  @@index([folder_id])
+}
+
+model upload_sessions {
+  id               String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  file_id          String?               @db.Uuid
+  user_id          String                @db.Uuid
+  target_folder_id String?               @db.Uuid
+  target_name      String
+  minio_upload_id  String
+  total_parts      Int
+  status           upload_session_status @default(pending)
+  expires_at       DateTime              @db.Timestamptz(6)
+  created_at       DateTime              @default(now()) @db.Timestamptz(6)
+
+  file          files?                @relation(fields: [file_id], references: [id])
+  user          users                 @relation(fields: [user_id], references: [id])
+  target_folder folders?              @relation("upload_target_folder", fields: [target_folder_id], references: [id])
+  parts         upload_session_parts[]
+
+  @@index([user_id])
+}
+
+model upload_session_parts {
+  upload_session_id String   @db.Uuid
+  part_number       Int
+  size_bytes        BigInt
+  completed_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  upload_session upload_sessions @relation(fields: [upload_session_id], references: [id], onDelete: Cascade)
+
+  @@id([upload_session_id, part_number])
+}
+
+model sessions {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id            String    @db.Uuid
+  refresh_token_hash String    @unique
+  device_info        String?
+  expires_at         DateTime  @db.Timestamptz(6)
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  revoked_at         DateTime? @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+}
+
+enum item_type {
+  file
+  folder
+}
+
+enum permission_role {
+  owner
+  editor
+  viewer
+}
+
+enum share_link_role {
+  editor
+  viewer
+}
+
+model permissions {
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  item_type  item_type
+  item_id    String          @db.Uuid
+  user_id    String          @db.Uuid
+  role       permission_role
+  granted_by String          @db.Uuid // deliberately not a FK — see 0003's column comment
+  created_at DateTime        @default(now()) @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([item_type, item_id, user_id])
+  @@index([item_type, item_id])
+  @@index([user_id])
+}
+
+model effective_permissions {
+  item_type            item_type
+  item_id              String          @db.Uuid
+  user_id              String          @db.Uuid
+  role                 permission_role
+  source_permission_id String?         @db.Uuid
+  recomputed_at        DateTime        @default(now()) @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([item_type, item_id, user_id])
+}
+
+model share_links {
+  id                                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  item_type                          item_type
+  item_id                            String          @db.Uuid
+  token                              String          @unique
+  role                               share_link_role
+  password_hash                      String?
+  failed_password_attempts           Int             @default(0)
+  failed_attempts_window_started_at  DateTime?       @db.Timestamptz(6)
+  expires_at                         DateTime?       @db.Timestamptz(6)
+  created_by                         String          @db.Uuid
+  created_at                         DateTime        @default(now()) @db.Timestamptz(6)
+
+  creator users @relation(fields: [created_by], references: [id], onDelete: Cascade)
+
+  @@index([item_type, item_id])
+}
+
+model favorites {
+  user_id    String   @db.Uuid
+  item_type  item_type
+  item_id    String   @db.Uuid
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, item_type, item_id])
+  @@index([item_type, item_id])
+}
+
+model tags {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  owner_id   String   @db.Uuid
+  name       String
+  color      String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  owner users       @relation(fields: [owner_id], references: [id], onDelete: Cascade)
+  items item_tags[]
+
+  @@unique([owner_id, name])
+  @@index([owner_id])
+}
+
+model item_tags {
+  tag_id     String   @db.Uuid
+  item_type  item_type
+  item_id    String   @db.Uuid
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  tag tags @relation(fields: [tag_id], references: [id], onDelete: Cascade)
+
+  @@id([tag_id, item_type, item_id])
+  @@index([item_type, item_id])
+  @@index([tag_id])
+}
+
+enum activity_action {
+  upload
+  download
+  rename
+  move
+  delete
+  restore
+  purge
+  share
+  unshare
+  create_share_link
+  revoke_share_link
+  favorite
+  unfavorite
+  tag
+  untag
+  quota_change
+  permission_change
+  ownership_transfer
+  view
+  account_deactivate
+  account_reactivate
+  account_delete
+}
+
+// Deliberately no relations to `users` here — actor_id/subject_user_id are plain uuid columns
+// with no FK at all (DESIGN.md §3.9/§7 item #6(f)): these rows must survive the referenced
+// user's permanent deletion, which a real FK cannot express alongside "still show up in
+// queries." Callers snapshot a display name into `metadata` at write time for the same reason.
+model activity_log {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actor_id        String?          @db.Uuid
+  subject_user_id String?          @db.Uuid
+  item_type       item_type?
+  item_id         String?          @db.Uuid
+  action          activity_action
+  metadata        Json             @default("{}")
+  created_at      DateTime         @default(now()) @db.Timestamptz(6)
+
+  @@index([item_type, item_id])
+  @@index([actor_id, created_at])
+  @@index([subject_user_id, created_at])
+}
+
+enum deletion_queue_status {
+  pending
+  processing
+  done
+  failed
+}
+
+enum thumbnail_queue_status {
+  pending
+  processing
+  done
+  failed
+}
+
+model thumbnail_queue {
+  id           String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  file_id      String                  @db.Uuid
+  status       thumbnail_queue_status  @default(pending)
+  attempts     Int                     @default(0)
+  enqueued_at  DateTime                @default(now()) @db.Timestamptz(6)
+  processed_at DateTime?               @db.Timestamptz(6)
+
+  file files @relation(fields: [file_id], references: [id], onDelete: Cascade)
+
+  @@index([status, enqueued_at])
+}
+
+model deletion_queue {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  item_type     item_type
+  item_id       String               @db.Uuid
+  storage_key   String?
+  thumbnail_key String?
+  owner_id      String?              @db.Uuid
+  size_bytes    BigInt               @default(0)
+  status        deletion_queue_status @default(pending)
+  attempts      Int                  @default(0)
+  enqueued_at   DateTime             @default(now()) @db.Timestamptz(6)
+  processed_at  DateTime?            @db.Timestamptz(6)
+
+  @@index([status])
+}
+
+model password_reset_tokens {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String    @db.Uuid
+  token_hash String    @unique
+  expires_at DateTime  @db.Timestamptz(6)
+  used_at    DateTime? @db.Timestamptz(6)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+}

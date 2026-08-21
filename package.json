@@ -1,0 +1,35 @@
+{
+  "name": "dbase-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "prisma:pull": "prisma db pull",
+    "prisma:generate": "prisma generate",
+    "bootstrap:admin": "tsx scripts/bootstrap-admin.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/rate-limit": "^10.2.1",
+    "@prisma/client": "^6.1.0",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.0",
+    "minio": "^8.0.3",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.10.5",
+    "prisma": "^6.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
