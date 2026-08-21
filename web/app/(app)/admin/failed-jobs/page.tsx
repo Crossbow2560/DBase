@@ -28,7 +28,7 @@ export default function AdminFailedJobsPage() {
       {data && data.jobs.length === 0 && <p className="text-sm text-muted-foreground">No stuck jobs.</p>}
       <ul className="divide-y divide-border rounded-md border border-border">
         {data?.jobs.map((job) => (
-          <li key={job.id} className="px-3 py-2 text-sm">
+          <li key={job.id} className="break-words px-3 py-2 text-sm">
             {job.itemType} {job.itemId} — {job.attempts} attempts, enqueued{" "}
             {new Date(job.enqueuedAt).toLocaleString()}
           </li>

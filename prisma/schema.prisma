@@ -61,6 +61,18 @@ model users {
   tags                  tags[]
 }
 
+// Singleton (always exactly one row, id = true) — supabase/migrations/0015_system_storage_limit.sql.
+// Hand-added rather than pulled via `prisma db pull`: DIRECT_URL (a non-pooled Postgres
+// connection, distinct from the pgbouncer DATABASE_URL this app actually runs against) isn't
+// reachable from every environment this repo gets worked in, so introspection can't always run.
+// Reconciled by hand against that migration's DDL instead, following this file's own field-naming
+// style — same fallback its header comment already anticipates for exactly this situation.
+model system_settings {
+  id                        Boolean  @id @default(true)
+  total_storage_limit_bytes BigInt   @default(536870912000)
+  updated_at                DateTime @default(now()) @db.Timestamptz(6)
+}
+
 enum upload_status {
   pending
   complete
@@ -288,6 +300,7 @@ enum activity_action {
   tag
   untag
   quota_change
+  system_storage_limit_change
   permission_change
   ownership_transfer
   view

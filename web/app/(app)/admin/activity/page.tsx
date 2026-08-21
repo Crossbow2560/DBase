@@ -22,26 +22,30 @@ export default function AdminActivityPage() {
     <div className="space-y-4">
       <h1 className="text-xl font-semibold">Activity log</h1>
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-border text-left text-muted-foreground">
-            <th className="py-2">Action</th>
-            <th className="py-2">Actor</th>
-            <th className="py-2">Subject</th>
-            <th className="py-2">When</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data?.entries.map((entry) => (
-            <tr key={entry.id} className="border-b border-border">
-              <td className="py-2">{entry.action}</td>
-              <td className="py-2 text-muted-foreground">{entry.actorId ?? "—"}</td>
-              <td className="py-2 text-muted-foreground">{entry.subjectUserId ?? "—"}</td>
-              <td className="py-2 text-muted-foreground">{new Date(entry.createdAt).toLocaleString()}</td>
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/40 text-left text-muted-foreground">
+              <th className="whitespace-nowrap px-3 py-2">Action</th>
+              <th className="whitespace-nowrap px-3 py-2">Actor</th>
+              <th className="whitespace-nowrap px-3 py-2">Subject</th>
+              <th className="whitespace-nowrap px-3 py-2">When</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {data?.entries.map((entry) => (
+              <tr key={entry.id} className="border-b border-border">
+                <td className="whitespace-nowrap px-3 py-2">{entry.action}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{entry.actorId ?? "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{entry.subjectUserId ?? "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
+                  {new Date(entry.createdAt).toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

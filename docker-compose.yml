@@ -9,7 +9,7 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-dbase_session}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
-      DEFAULT_USER_QUOTA_BYTES: ${DEFAULT_USER_QUOTA_BYTES:-5368709120}
+      DEFAULT_USER_QUOTA_BYTES: ${DEFAULT_USER_QUOTA_BYTES:-16106127360}
       PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
       PORT: "3000"
       # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
@@ -44,7 +44,14 @@ services:
       # documentation of *why* the image is only correct in this specific topology, but it's
       # made explicit rather than relying on the Dockerfile default silently matching by luck.
       args:
-        BACKEND_URL: http://backend:3000
+        # Docker-internal by default (correct for this compose file's own networking,
+        # regardless of what public domain users actually visit — this URL is only ever used
+        # server-side, inside the frontend container, to reach the backend container by its
+        # Docker Compose service name). Only override via .env if the frontend and backend are
+        # NOT both running under this same docker-compose.yml (e.g. deployed as separate
+        # services on different hosts) — in that case, set it to wherever the backend is
+        # actually reachable FROM the frontend container.
+        BACKEND_URL: ${BACKEND_URL:-http://backend:3000}
     ports:
       - "3001:3001"
     depends_on:

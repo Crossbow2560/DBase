@@ -7,6 +7,7 @@
 // component just surfaces whatever error that produces rather than re-validating client-side.
 
 import * as React from "react";
+import { ArrowUp, Folder as FolderIcon } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 
@@ -16,16 +17,19 @@ interface FolderOption {
   type: "file" | "folder";
 }
 
+export interface MoveTarget {
+  id: string;
+  type: "file" | "folder";
+}
+
 export function MoveModal({
-  itemType,
-  itemId,
-  itemName,
+  items,
+  label,
   onClose,
   onMoved,
 }: {
-  itemType: "file" | "folder";
-  itemId: string;
-  itemName: string;
+  items: MoveTarget[];
+  label: string;
   onClose: () => void;
   onMoved: () => void;
 }) {
@@ -43,11 +47,21 @@ export function MoveModal({
       .finally(() => setIsLoading(false));
   }, [currentFolderId]);
 
+  // A folder being moved can't be moved into itself — filters out every selected folder, not
+  // just a single one, so this holds for a bulk move too.
+  const movedFolderIds = new Set(items.filter((i) => i.type === "folder").map((i) => i.id));
+
   async function moveHere() {
     setError(null);
     try {
-      const body = itemType === "folder" ? { parentFolderId: currentFolderId } : { folderId: currentFolderId };
-      await api.patch(itemType === "folder" ? `/folders/${itemId}` : `/files/${itemId}`, body);
+      await Promise.all(
+        items.map((item) =>
+          api.patch(
+            item.type === "folder" ? `/folders/${item.id}` : `/files/${item.id}`,
+            item.type === "folder" ? { parentFolderId: currentFolderId } : { folderId: currentFolderId },
+          ),
+        ),
+      );
       onMoved();
       onClose();
     } catch (err) {
@@ -58,13 +72,21 @@ export function MoveModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
       <div className="w-full max-w-sm space-y-3 rounded-md bg-background p-4" onClick={(e) => e.stopPropagation()}>
-        <h2 className="text-sm font-semibold">Move &quot;{itemName}&quot;</h2>
+        <h2 className="text-sm font-semibold">Move {label}</h2>
 
         <div className="flex items-center justify-between text-sm text-muted-foreground">
           <span>Currently browsing: {currentFolderName}</span>
           {currentFolderId && (
-            <button type="button" className="hover:underline" onClick={() => { setCurrentFolderId(null); setCurrentFolderName("My Files"); }}>
-              ⤴ Root
+            <button
+              type="button"
+              className="flex items-center gap-1 hover:underline"
+              onClick={() => {
+                setCurrentFolderId(null);
+                setCurrentFolderName("My Files");
+              }}
+            >
+              <ArrowUp className="h-3 w-3" aria-hidden />
+              Root
             </button>
           )}
         </div>
@@ -75,18 +97,19 @@ export function MoveModal({
             <li className="px-3 py-2 text-sm text-muted-foreground">No subfolders here.</li>
           )}
           {subfolders
-            .filter((f) => !(itemType === "folder" && f.id === itemId))
+            .filter((f) => !movedFolderIds.has(f.id))
             .map((folder) => (
               <li key={folder.id}>
                 <button
                   type="button"
-                  className="w-full px-3 py-2 text-left text-sm hover:bg-muted"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
                   onClick={() => {
                     setCurrentFolderId(folder.id);
                     setCurrentFolderName(folder.name);
                   }}
                 >
-                  📁 {folder.name}
+                  <FolderIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                  {folder.name}
                 </button>
               </li>
             ))}

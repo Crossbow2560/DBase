@@ -84,76 +84,82 @@ export default function AdminUsersPage() {
       <h1 className="text-xl font-semibold">Users</h1>
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-border text-left text-muted-foreground">
-            <th className="py-2">User</th>
-            <th className="py-2">Role</th>
-            <th className="py-2">Status</th>
-            <th className="py-2">Storage</th>
-            <th className="py-2" />
-          </tr>
-        </thead>
-        <tbody>
-          {data?.users.map((userRow) => (
-            <tr key={userRow.id} className="border-b border-border">
-              <td className="py-2">
-                <Link href={`/admin/users/${userRow.id}`} className="hover:underline">
-                  {userRow.displayName}
-                </Link>
-                <div className="text-muted-foreground">{userRow.email}</div>
-              </td>
-              <td className="py-2">
-                <div className="flex items-center gap-2">
-                  <span>{userRow.role}</span>
-                  <Button variant="outline" size="sm" onClick={() => toggleRole(userRow)}>
-                    {userRow.role === "admin" ? "Demote" : "Promote"}
-                  </Button>
-                </div>
-              </td>
-              <td className="py-2">{userRow.isActive ? "Active" : "Deactivated"}</td>
-              <td className="py-2">
-                {editingQuotaId === userRow.id ? (
-                  <div className="flex items-center gap-1">
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.1"
-                      value={quotaGb}
-                      onChange={(e) => setQuotaGb(e.target.value)}
-                      className="w-20"
-                    />
-                    <span className="text-muted-foreground">GB</span>
-                    <Button size="sm" onClick={() => saveQuota(userRow)}>
-                      Save
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => setEditingQuotaId(null)}>
-                      Cancel
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted/40 text-left text-muted-foreground">
+              <th className="whitespace-nowrap px-3 py-2">User</th>
+              <th className="hidden whitespace-nowrap px-3 py-2 sm:table-cell">Role</th>
+              <th className="hidden whitespace-nowrap px-3 py-2 md:table-cell">Status</th>
+              <th className="whitespace-nowrap px-3 py-2">Storage</th>
+              <th className="px-3 py-2" />
+            </tr>
+          </thead>
+          <tbody>
+            {data?.users.map((userRow) => (
+              <tr key={userRow.id} className="border-b border-border">
+                <td className="whitespace-nowrap px-3 py-2">
+                  <Link href={`/admin/users/${userRow.id}`} className="hover:underline">
+                    {userRow.displayName}
+                  </Link>
+                  <div className="text-muted-foreground">{userRow.email}</div>
+                </td>
+                <td className="hidden whitespace-nowrap px-3 py-2 sm:table-cell">
+                  <div className="flex items-center gap-2">
+                    <span>{userRow.role}</span>
+                    <Button variant="outline" size="sm" onClick={() => toggleRole(userRow)}>
+                      {userRow.role === "admin" ? "Demote" : "Promote"}
                     </Button>
                   </div>
-                ) : (
-                  <button
-                    type="button"
-                    className="hover:underline"
-                    onClick={() => startEditingQuota(userRow)}
-                    title="Click to edit quota"
-                  >
-                    {(userRow.storageUsedBytes / 1e9).toFixed(2)} / {(userRow.storageQuotaBytes / 1e9).toFixed(2)} GB
-                  </button>
-                )}
-              </td>
-              <td className="py-2 space-x-2 text-right">
-                <Button variant="outline" size="sm" onClick={() => toggleActive(userRow)}>
-                  {userRow.isActive ? "Deactivate" : "Reactivate"}
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => deleteUser(userRow)}>
-                  Delete
-                </Button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                </td>
+                <td className="hidden whitespace-nowrap px-3 py-2 md:table-cell">
+                  {userRow.isActive ? "Active" : "Deactivated"}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {editingQuotaId === userRow.id ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.1"
+                        value={quotaGb}
+                        onChange={(e) => setQuotaGb(e.target.value)}
+                        className="w-20"
+                      />
+                      <span className="text-muted-foreground">GB</span>
+                      <Button size="sm" onClick={() => saveQuota(userRow)}>
+                        Save
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setEditingQuotaId(null)}>
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="hover:underline"
+                      onClick={() => startEditingQuota(userRow)}
+                      title="Click to edit quota"
+                    >
+                      {(userRow.storageUsedBytes / 1e9).toFixed(2)} / {(userRow.storageQuotaBytes / 1e9).toFixed(2)} GB
+                    </button>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 text-right">
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button variant="outline" size="sm" onClick={() => toggleActive(userRow)}>
+                      {userRow.isActive ? "Deactivate" : "Reactivate"}
+                    </Button>
+                    <Button variant="destructive" size="sm" onClick={() => deleteUser(userRow)}>
+                      Delete
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

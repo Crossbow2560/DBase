@@ -12,7 +12,7 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "dbase_session",
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS ?? 30),
-  defaultUserQuotaBytes: BigInt(process.env.DEFAULT_USER_QUOTA_BYTES ?? "5368709120"),
+  defaultUserQuotaBytes: BigInt(process.env.DEFAULT_USER_QUOTA_BYTES ?? "16106127360"), // 15 GiB
   passwordResetTtlMinutes: Number(process.env.PASSWORD_RESET_TTL_MINUTES ?? 30),
   databaseUrl: requireEnv("DATABASE_URL"),
 

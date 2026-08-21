@@ -15,7 +15,9 @@
 // done.
 
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "./api-client";
+import { queryKeys } from "./query-keys";
 
 const CHUNK_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 const STORAGE_KEY_PREFIX = "dbase:upload-session:";
@@ -51,9 +53,17 @@ interface InternalTaskState {
   pauseRequested: boolean;
 }
 
+async function abortSessionOnServer(uploadSessionId: string) {
+  await fetch(`/api/v1/files/upload-sessions/${uploadSessionId}`, {
+    method: "DELETE",
+    credentials: "include",
+  }).catch(() => undefined);
+}
+
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [uploads, setUploads] = React.useState<UploadTask[]>([]);
   const internalRef = React.useRef<Map<string, InternalTaskState>>(new Map());
+  const queryClient = useQueryClient();
 
   function updateTask(id: string, patch: Partial<UploadTask>) {
     setUploads((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -134,7 +144,19 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
       window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);
       updateTask(id, { status: "complete", uploadedBytes: internal.file.size });
+      queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
     } catch (err) {
+      // A failure here (network error, a later part rejected for quota, destination no longer
+      // valid, etc.) can land after earlier parts already succeeded and had their bytes credited
+      // against the user's quota server-side. Without explicitly aborting, that credited quota
+      // would sit "used" against an upload that never completes until the session's TTL-based
+      // cleanup worker eventually reclaims it (config.uploadSessionTtlMinutes) — visibly wrong to
+      // the user in the meantime. Abort immediately instead, same as an explicit cancel.
+      if (internal.uploadSessionId) {
+        await abortSessionOnServer(internal.uploadSessionId);
+        window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);
+        queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
+      }
       updateTask(id, {
         status: "error",
         error: err instanceof ApiError ? err.message : "Something went wrong.",
@@ -173,10 +195,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   async function cancel(id: string) {
     const internal = internalRef.current.get(id);
     if (internal?.uploadSessionId) {
-      await fetch(`/api/v1/files/upload-sessions/${internal.uploadSessionId}`, {
-        method: "DELETE",
-        credentials: "include",
-      }).catch(() => undefined);
+      await abortSessionOnServer(internal.uploadSessionId);
+      queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
     }
     if (internal) internal.pauseRequested = true;
     window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);

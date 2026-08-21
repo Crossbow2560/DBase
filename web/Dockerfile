@@ -27,6 +27,14 @@ FROM node:22-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3001
+# Next's standalone server.js does `process.env.HOSTNAME || '0.0.0.0'` to pick its bind address.
+# Docker auto-populates HOSTNAME with the container's own ID for every container regardless of
+# this Dockerfile — server.js resolves that as a hostname to the container's internal bridge IP
+# and binds only there, so the published port (docker-compose.yml's 3001:3001) can never reach
+# it: the container is up and logs "Ready", but the host gets connection refused. Overriding
+# HOSTNAME here forces the bind-all-interfaces path instead. Found by actually curling the
+# published port after `docker compose up` and getting connection refused despite healthy logs.
+ENV HOSTNAME=0.0.0.0
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 

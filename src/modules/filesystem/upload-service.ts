@@ -8,6 +8,7 @@ import {
   nameCollision,
   folderNotFound,
   quotaExceeded,
+  systemStorageLimitExceeded,
   uploadSessionNotFound,
   uploadSessionInvalid,
 } from "./errors.js";
@@ -232,14 +233,30 @@ async function assertNoLiveNameCollision(userId: string, folderId: string | null
  * catch that case and raise a real error. A credit-back that would go negative means some
  * earlier accounting step double-counted or under-counted; masking that by silently no-op'ing
  * would hide the bug instead of surfacing it.
+ *
+ * The system-wide cap (supabase/migrations/0015_system_storage_limit.sql) is a separate
+ * BEFORE UPDATE trigger on this same UPDATE, not something this function's own WHERE clause
+ * checks — it can't be folded into the WHERE clause the way the per-user quota is, since it
+ * depends on every OTHER user's row too, not just this one. When it fires, Postgres raises
+ * rather than just omitting a row from RETURNING, so it surfaces here as a thrown error, not a
+ * false return — translated into the distinct SYSTEM_STORAGE_LIMIT_EXCEEDED error rather than
+ * left to read as an unexplained 500, or worse, conflated with QUOTA_EXCEEDED (this account's
+ * own quota is not the problem in this case).
  */
 async function tryCreditQuota(userId: string, delta: bigint): Promise<boolean> {
-  const rows = await db.$queryRaw<{ storage_used_bytes: bigint }[]>`
-    UPDATE users
-    SET storage_used_bytes = storage_used_bytes + ${delta}
-    WHERE id = ${userId}::uuid
-      AND storage_used_bytes + ${delta} <= storage_quota_bytes
-    RETURNING storage_used_bytes
-  `;
-  return rows.length > 0;
+  try {
+    const rows = await db.$queryRaw<{ storage_used_bytes: bigint }[]>`
+      UPDATE users
+      SET storage_used_bytes = storage_used_bytes + ${delta}
+      WHERE id = ${userId}::uuid
+        AND storage_used_bytes + ${delta} <= storage_quota_bytes
+      RETURNING storage_used_bytes
+    `;
+    return rows.length > 0;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("SYSTEM_STORAGE_LIMIT_EXCEEDED")) {
+      throw systemStorageLimitExceeded();
+    }
+    throw err;
+  }
 }

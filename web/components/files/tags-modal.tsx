@@ -4,6 +4,7 @@
 // app/(app)/tags/page.tsx, which manages the tag definitions themselves.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { X, Tag as TagIcon } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 
@@ -58,8 +59,8 @@ export function TagsModal({
       <div className="w-full max-w-sm rounded-md bg-background p-4" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-semibold">Tags on &quot;{itemName}&quot;</h2>
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            ✕
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
+            <X className="h-4 w-4" aria-hidden />
           </Button>
         </div>
 
@@ -69,7 +70,10 @@ export function TagsModal({
           <ul className="divide-y divide-border rounded-md border border-border">
             {itemTags?.tags.map((tag) => (
               <li key={tag.id} className="flex items-center justify-between px-3 py-2 text-sm">
-                <span>🏷️ {tag.name}</span>
+                <span className="flex items-center gap-2">
+                  <TagIcon className="h-4 w-4 text-muted-foreground" aria-hidden />
+                  {tag.name}
+                </span>
                 <Button variant="ghost" size="sm" onClick={() => removeTag(tag.id)}>
                   Remove
                 </Button>
@@ -92,7 +96,10 @@ export function TagsModal({
           <ul className="divide-y divide-border rounded-md border border-border">
             {availableTags.map((tag) => (
               <li key={tag.id} className="flex items-center justify-between px-3 py-2 text-sm">
-                <span>🏷️ {tag.name}</span>
+                <span className="flex items-center gap-2">
+                  <TagIcon className="h-4 w-4 text-muted-foreground" aria-hidden />
+                  {tag.name}
+                </span>
                 <Button variant="ghost" size="sm" onClick={() => applyTag(tag.id)}>
                   Apply
                 </Button>

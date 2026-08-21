@@ -4,10 +4,5 @@ import { FolderBrowser } from "@/components/files/folder-browser";
 // stay a Server Component and just await it directly.
 export default async function FolderPage({ params }: { params: Promise<{ folderId: string }> }) {
   const { folderId } = await params;
-  return (
-    <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Folder</h1>
-      <FolderBrowser folderId={folderId} />
-    </div>
-  );
+  return <FolderBrowser folderId={folderId} />;
 }

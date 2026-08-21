@@ -60,8 +60,16 @@ export async function getFolderContents(userId: string, folderId: string | null)
     // inside an authorized folder is visible, regardless of who owns each individual child —
     // access to the PARENT is what was just checked; the children inherit it structurally.
     const [folders, files] = await Promise.all([
-      db.folders.findMany({ where: { parent_folder_id: folderId, deleted_at: null }, orderBy: { name: "asc" } }),
-      db.files.findMany({ where: { folder_id: folderId, deleted_at: null }, orderBy: { name: "asc" } }),
+      db.folders.findMany({
+        where: { parent_folder_id: folderId, deleted_at: null },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true, updated_at: true },
+      }),
+      db.files.findMany({
+        where: { folder_id: folderId, deleted_at: null },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true, size_bytes: true, mime_type: true, updated_at: true },
+      }),
     ]);
     return {
       folder: { id: folder.id, name: folder.name, parentFolderId: folder.parent_folder_id },
@@ -73,24 +81,38 @@ export async function getFolderContents(userId: string, folderId: string | null)
   // space." REQUIREMENTS.md's "Shared with me" (access.listSharedWithMe) is the separate
   // listing for items shared with this user; root never merges the two.
   const [folders, files] = await Promise.all([
-    db.folders.findMany({ where: { owner_id: userId, parent_folder_id: null, deleted_at: null }, orderBy: { name: "asc" } }),
-    db.files.findMany({ where: { owner_id: userId, folder_id: null, deleted_at: null }, orderBy: { name: "asc" } }),
+    db.folders.findMany({
+      where: { owner_id: userId, parent_folder_id: null, deleted_at: null },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, updated_at: true },
+    }),
+    db.files.findMany({
+      where: { owner_id: userId, folder_id: null, deleted_at: null },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, size_bytes: true, mime_type: true, updated_at: true },
+    }),
   ]);
   return { folder: null, items: serializeItems(folders, files) };
 }
 
 function serializeItems(
-  folders: { id: string; name: string }[],
-  files: { id: string; name: string; size_bytes: bigint; mime_type: string }[],
+  folders: { id: string; name: string; updated_at: Date }[],
+  files: { id: string; name: string; size_bytes: bigint; mime_type: string; updated_at: Date }[],
 ) {
   return [
-    ...folders.map((f) => ({ id: f.id, name: f.name, type: "folder" as const })),
+    ...folders.map((f) => ({
+      id: f.id,
+      name: f.name,
+      type: "folder" as const,
+      updatedAt: f.updated_at.toISOString(),
+    })),
     ...files.map((f) => ({
       id: f.id,
       name: f.name,
       type: "file" as const,
       sizeBytes: f.size_bytes.toString(),
       mimeType: f.mime_type,
+      updatedAt: f.updated_at.toISOString(),
     })),
   ];
 }

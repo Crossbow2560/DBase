@@ -7,3 +7,6 @@ export const invalidQuota = () =>
 
 export const lastAdminStanding = () =>
   new AppError(409, "LAST_ADMIN", "This would leave zero admin accounts — at least one must always remain.");
+
+export const invalidStorageLimit = () =>
+  new AppError(400, "VALIDATION_ERROR", "Storage limit must be a non-negative integer number of bytes.");

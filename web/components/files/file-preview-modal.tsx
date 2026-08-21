@@ -7,6 +7,7 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 
@@ -59,8 +60,8 @@ export function FilePreviewModal({
             <Button variant="outline" size="sm" onClick={download}>
               Download
             </Button>
-            <Button variant="ghost" size="sm" onClick={onClose}>
-              ✕
+            <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
+              <X className="h-4 w-4" aria-hidden />
             </Button>
           </div>
         </div>

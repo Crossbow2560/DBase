@@ -8,6 +8,7 @@
 import * as React from "react";
 import { use } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Folder, FileText } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,15 +74,36 @@ export default function PublicShareLinkPage({ params }: { params: Promise<{ toke
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4 p-6">
+    <div className="mx-auto max-w-3xl space-y-4 p-6">
       <h1 className="text-xl font-semibold">{data?.name}</h1>
-      <ul className="divide-y divide-border rounded-md border border-border">
-        {data?.items.map((item) => (
-          <li key={item.id} className="px-3 py-2 text-sm">
-            {item.type === "folder" ? "📁" : "📄"} {item.name}
-          </li>
-        ))}
-      </ul>
+      {data && data.items.length === 0 && <p className="text-sm text-muted-foreground">This folder is empty.</p>}
+      {data && data.items.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Name</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {data.items.map((item) => (
+                <tr key={item.id} className="hover:bg-muted/30">
+                  <td className="px-4 py-2.5 align-middle">
+                    <div className="flex items-center gap-2.5">
+                      {item.type === "folder" ? (
+                        <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      ) : (
+                        <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      )}
+                      <span className="font-medium">{item.name}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

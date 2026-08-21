@@ -24,6 +24,16 @@ export const notAFolder = () => new AppError(400, "NOT_A_FOLDER", "Target is not
 export const quotaExceeded = () =>
   new AppError(422, "QUOTA_EXCEEDED", "This upload would exceed your storage quota.");
 
+// Distinct from quotaExceeded() (REQUIREMENTS.md §5.12: specific codes per failure reason) —
+// this is the whole system's shared cap being full, not this account's own quota, and the
+// frontend should say so rather than implying the user's personal quota is at fault.
+export const systemStorageLimitExceeded = () =>
+  new AppError(
+    422,
+    "SYSTEM_STORAGE_LIMIT_EXCEEDED",
+    "This upload would exceed the system's total storage limit. Contact an admin.",
+  );
+
 export const uploadSessionNotFound = () =>
   new AppError(404, "UPLOAD_SESSION_NOT_FOUND", "Upload session not found or already finished.");
 

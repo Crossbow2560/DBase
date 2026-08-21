@@ -7,6 +7,7 @@
 
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { X } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -138,8 +139,8 @@ export function ShareModal({
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-semibold">Share &quot;{itemName}&quot;</h2>
-          <Button variant="ghost" size="sm" onClick={onClose}>
-            ✕
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close">
+            <X className="h-4 w-4" aria-hidden />
           </Button>
         </div>
 

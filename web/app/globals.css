@@ -3,28 +3,35 @@
 @tailwind utilities;
 
 @layer base {
+  /* Palette: F6FAFD (background) / B3CFE5 (muted) / 4A7FA7 (accent) / 1A3D63 (muted text) /
+     0A1931 (foreground, darkest accent). Light colors carry the UI; the two dark blues are
+     reserved for accents, highlights, and body text — never a background of their own. */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --border: 214 32% 91%;
-    --primary: 222 47% 11%;
-    --primary-foreground: 210 40% 98%;
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 210 40% 98%;
+    --background: 206 64% 98%;
+    --foreground: 217 66% 12%;
+    --muted: 206 49% 80%;
+    --muted-foreground: 211 58% 25%;
+    --border: 206 45% 88%;
+    --primary: 217 66% 12%;
+    --primary-foreground: 206 64% 98%;
+    --accent: 206 39% 47%;
+    --accent-foreground: 206 64% 98%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
     --radius: 0.5rem;
   }
 
   .dark {
-    --background: 222 47% 11%;
-    --foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --border: 217 33% 20%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222 47% 11%;
-    --destructive: 0 63% 31%;
+    --background: 217 66% 8%;
+    --foreground: 206 64% 98%;
+    --muted: 211 45% 18%;
+    --muted-foreground: 206 39% 65%;
+    --border: 211 40% 22%;
+    --primary: 206 64% 98%;
+    --primary-foreground: 217 66% 12%;
+    --accent: 206 49% 68%;
+    --accent-foreground: 217 66% 12%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 210 40% 98%;
   }
 }
@@ -35,5 +42,8 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+  ::selection {
+    @apply bg-accent/30;
   }
 }

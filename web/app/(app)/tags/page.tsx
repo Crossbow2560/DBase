@@ -6,7 +6,9 @@
 
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Tag as TagIcon, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -45,11 +47,13 @@ export default function TagsPage() {
   }
 
   return (
-    <div className="max-w-md space-y-4">
-      <h1 className="text-xl font-semibold">Tags</h1>
-      <p className="text-sm text-muted-foreground">
-        Personal labels — only you can see or apply your tags, even on items you don&apos;t own.
-      </p>
+    <div className="max-w-lg space-y-4">
+      <div>
+        <h1 className="text-xl font-semibold">Tags</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Personal labels — only you can see or apply your tags, even on items you don&apos;t own.
+        </p>
+      </div>
 
       <form onSubmit={createTag} className="flex gap-2">
         <Input placeholder="New tag name" value={name} onChange={(e) => setName(e.target.value)} className="flex-1" />
@@ -59,16 +63,33 @@ export default function TagsPage() {
 
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
       {data && data.tags.length === 0 && <p className="text-sm text-muted-foreground">No tags yet.</p>}
-      <ul className="divide-y divide-border rounded-md border border-border">
-        {data?.tags.map((tag) => (
-          <li key={tag.id} className="flex items-center justify-between px-3 py-2 text-sm">
-            <span>🏷️ {tag.name}</span>
-            <Button variant="ghost" size="sm" onClick={() => deleteTag(tag)}>
-              Delete
-            </Button>
-          </li>
-        ))}
-      </ul>
+
+      {data && data.tags.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <ul className="divide-y divide-border">
+            {data.tags.map((tag) => (
+              <li key={tag.id} className="group flex items-center justify-between px-4 py-2.5 text-sm hover:bg-muted/30">
+                <span className="flex items-center gap-2.5 font-medium">
+                  <TagIcon
+                    className={cn("h-4 w-4 shrink-0", !tag.color && "text-muted-foreground")}
+                    style={tag.color ? { color: tag.color } : undefined}
+                    aria-hidden
+                  />
+                  {tag.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => deleteTag(tag)}
+                  title="Delete tag"
+                  className="text-muted-foreground opacity-100 transition-opacity hover:text-destructive sm:opacity-0 sm:group-hover:opacity-100"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

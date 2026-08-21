@@ -7,6 +7,7 @@
 
 import { use } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Folder, FileText } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 
@@ -26,16 +27,37 @@ export default function AdminUserFilesPage({ params }: { params: Promise<{ userI
   });
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="space-y-4">
       <h1 className="text-xl font-semibold">User&apos;s files</h1>
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-      <ul className="divide-y divide-border rounded-md border border-border">
-        {data?.items.map((item) => (
-          <li key={item.id} className="px-3 py-2 text-sm">
-            {item.type === "folder" ? "📁" : "📄"} {item.name}
-          </li>
-        ))}
-      </ul>
+      {data && data.items.length === 0 && <p className="text-sm text-muted-foreground">This user has no files.</p>}
+      {data && data.items.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
+                <th className="px-4 py-2.5 font-medium">Name</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {data.items.map((item) => (
+                <tr key={item.id} className="hover:bg-muted/30">
+                  <td className="px-4 py-2.5 align-middle">
+                    <div className="flex items-center gap-2.5">
+                      {item.type === "folder" ? (
+                        <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      ) : (
+                        <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                      )}
+                      <span className="font-medium">{item.name}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

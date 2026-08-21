@@ -6,6 +6,7 @@
 export const queryKeys = {
   me: () => ["auth", "me"] as const,
   sessions: () => ["auth", "sessions"] as const,
+  storageUsage: () => ["users", "me", "storage"] as const,
 
   folderContents: (folderId: string | null) => ["folders", folderId, "contents"] as const,
   thumbnail: (fileId: string) => ["files", fileId, "thumbnail"] as const,
@@ -17,6 +18,7 @@ export const queryKeys = {
   adminUsers: () => ["admin", "users"] as const,
   adminUserFiles: (userId: string) => ["admin", "users", userId, "files"] as const,
   adminStats: () => ["admin", "stats"] as const,
+  adminSystemStorage: () => ["admin", "system-storage"] as const,
   adminActivity: () => ["admin", "activity"] as const,
   adminFailedJobs: () => ["admin", "failed-jobs"] as const,
 } as const;

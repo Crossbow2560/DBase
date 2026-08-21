@@ -1,5 +1,5 @@
 import { db } from "../../db.js";
-import { userNotFound, invalidQuota, lastAdminStanding } from "./errors.js";
+import { userNotFound, invalidQuota, lastAdminStanding, invalidStorageLimit } from "./errors.js";
 import { logActivity, logAdminViewIfNewSession } from "./audit-service.js";
 
 function mapUserRow(user: {
@@ -93,6 +93,49 @@ export async function getSystemStats() {
     totalUsers,
     totalStorageUsedBytes: Number(usage._sum.storage_used_bytes ?? 0n),
   };
+}
+
+/**
+ * The system-wide hard cap on SUM(users.storage_used_bytes) — the same number
+ * supabase/migrations/0015_system_storage_limit.sql's trigger enforces on every upload, surfaced
+ * here so the admin UI can show and edit it. totalStorageUsedBytes duplicates getSystemStats()'s
+ * own aggregate rather than sharing one round trip with it — this endpoint is deliberately
+ * standalone so the settings page doesn't need to also fetch /admin/stats to render a usage bar
+ * next to the limit it's editing.
+ */
+export async function getSystemStorageSettings() {
+  const [settings, usage] = await Promise.all([
+    db.system_settings.findUniqueOrThrow({ where: { id: true } }),
+    db.users.aggregate({ _sum: { storage_used_bytes: true } }),
+  ]);
+  return {
+    totalStorageLimitBytes: Number(settings.total_storage_limit_bytes),
+    totalStorageUsedBytes: Number(usage._sum.storage_used_bytes ?? 0n),
+  };
+}
+
+/**
+ * REQUIREMENTS.md §5.6-equivalent for the system-wide cap: only an admin can change it. Same
+ * "lowering below current usage is allowed" philosophy as changeQuota() above — it only affects
+ * future uploads, not existing data, so there's nothing to guard against here beyond basic
+ * input validation. The real enforcement is still the DB trigger (0015), not this function; this
+ * just writes the one row it reads.
+ */
+export async function setSystemStorageLimit(adminId: string, limitBytes: number): Promise<void> {
+  if (!Number.isInteger(limitBytes) || limitBytes < 0) throw invalidStorageLimit();
+
+  const previous = await db.system_settings.findUniqueOrThrow({ where: { id: true } });
+  await db.system_settings.update({ where: { id: true }, data: { total_storage_limit_bytes: BigInt(limitBytes) } });
+
+  await logActivity({
+    actorId: adminId,
+    subjectUserId: null,
+    action: "system_storage_limit_change",
+    metadata: {
+      previousLimitBytes: previous.total_storage_limit_bytes.toString(),
+      newLimitBytes: limitBytes.toString(),
+    },
+  });
 }
 
 /** DESIGN.md §3.10: DELETION_QUEUE rows stuck in `failed` after bounded retries, for manual investigation. */

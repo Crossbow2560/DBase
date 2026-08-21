@@ -112,6 +112,31 @@ export async function adminRoutes(app: FastifyInstance) {
     reply.send(stats);
   });
 
+  app.get("/api/v1/admin/system-storage", { preHandler: requireAdmin }, async (_request, reply) => {
+    const settings = await admin.getSystemStorageSettings();
+    reply.send(settings);
+  });
+
+  app.patch(
+    "/api/v1/admin/system-storage",
+    {
+      preHandler: requireAdmin,
+      ...writeHeavyRateLimit,
+      schema: {
+        body: {
+          type: "object",
+          required: ["totalStorageLimitBytes"],
+          properties: { totalStorageLimitBytes: { type: "integer" } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { totalStorageLimitBytes } = request.body as { totalStorageLimitBytes: number };
+      await admin.setSystemStorageLimit(request.session!.user_id, totalStorageLimitBytes);
+      reply.code(204).send();
+    },
+  );
+
   app.get("/api/v1/admin/activity", { preHandler: requireAdmin }, async (_request, reply) => {
     const entries = await admin.listActivity();
     reply.send({ entries });
