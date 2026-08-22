@@ -81,6 +81,15 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # `mc ready local` below only works out of the box on the image's default port 9000 — the
+      # image's entrypoint pre-configures a "local" alias pointed at localhost:9000 unconditionally,
+      # ignoring the --address above. MC_HOST_local is mc's own env-based alias override (mc reads
+      # MC_HOST_<alias> directly, takes priority over any pre-configured alias) — this is what
+      # actually makes the healthcheck follow MINIO_PORT. Found by reproducing the exact "unhealthy,
+      # dependency failed to start" failure locally: the healthcheck log showed it dialing
+      # localhost:9000 and getting connection refused even though the server was correctly listening
+      # on the custom port.
+      MC_HOST_local: http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@localhost:${MINIO_PORT:-9000}
     volumes:
       - minio-data:/data
     healthcheck:
