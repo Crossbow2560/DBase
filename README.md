@@ -22,10 +22,11 @@ See [APPLICATION_DESIGN.md](APPLICATION_DESIGN.md), [REQUIREMENTS.md](REQUIREMEN
    cp .env.example .env
    ```
 
-2. Fill in `.env`:
+2. Fill in `.env`. This is the **single config file for the whole app** — backend, frontend, and docker-compose all read it (there's no separate `web/.env.local` anymore):
    - `DATABASE_URL` / `DIRECT_URL` — from your Supabase dashboard under **Project Settings → Database → Connection string**. `DATABASE_URL` must be the pooled (port 6543) connection string; `DIRECT_URL` must be the direct (port 5432) one — it's only used for `prisma db pull`/`prisma generate`.
    - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — credentials for the MinIO container.
    - `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` — set these to the same values as `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` (only needed when running the backend outside Docker; Docker Compose maps them automatically).
+   - `PORT` / `FRONTEND_PORT` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` — change any of these if the default collides with something else already running on the machine (another app, another MinIO instance, etc). Each one drives both the container's internal port and its published host port, so one number is all you need per service.
    - Leave the other defaults unless you have a reason to change them.
 
 3. Apply the database schema. This app **does not use `prisma migrate`** — the schema lives in `supabase/migrations/`, applied through the Supabase dashboard/CLI. Once the Supabase database has the migrations applied, generate the Prisma client against it:
@@ -41,14 +42,14 @@ See [APPLICATION_DESIGN.md](APPLICATION_DESIGN.md), [REQUIREMENTS.md](REQUIREMEN
 docker compose up --build
 ```
 
-This starts three services:
+This starts three services, on whatever ports `.env` configures (defaults shown):
 
 | Service    | URL                              |
 |------------|-----------------------------------|
-| frontend   | http://localhost:3001            |
-| backend    | http://localhost:3000            |
-| MinIO API  | http://localhost:9000            |
-| MinIO console | http://localhost:9001         |
+| frontend   | http://localhost:3001 (`FRONTEND_PORT`) |
+| backend    | http://localhost:3000 (`PORT`)   |
+| MinIO API  | http://localhost:9000 (`MINIO_PORT`) |
+| MinIO console | http://localhost:9001 (`MINIO_CONSOLE_PORT`) |
 
 The `minio-init` one-shot container creates the `dbase` bucket automatically on first run.
 
@@ -83,7 +84,7 @@ npm install
 npm run dev                          # http://localhost:3001
 ```
 
-Note: outside Docker, the frontend's `/api/v1/*` proxy rewrite defaults to `http://localhost:3000`, which matches the backend's default port above.
+Note: outside Docker, the frontend's `/api/v1/*` proxy rewrite defaults to `http://localhost:<PORT>`, using the backend's `PORT` from the same `.env` — no separate config needed. `web/scripts/with-frontend-port.js` reads `FRONTEND_PORT` from the same file to pick the frontend's own port (defaults to 3001).
 
 ## Building for production
 

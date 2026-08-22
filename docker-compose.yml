@@ -4,19 +4,21 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      # Both sides driven by the same var (root .env's PORT) — change it if 3000 is already taken
+      # on this machine by something else. See .env.example.
+      - "${PORT:-3000}:${PORT:-3000}"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-dbase_session}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
       DEFAULT_USER_QUOTA_BYTES: ${DEFAULT_USER_QUOTA_BYTES:-16106127360}
       PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
-      PORT: "3000"
+      PORT: ${PORT:-3000}
       # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
       # IMPLEMENTATION_PHASES.md Subcomponent 1) that will actually talk to MinIO isn't built.
       # Present now so the container topology and secrets are already in place when it is.
       MINIO_ENDPOINT: minio
-      MINIO_PORT: "9000"
+      MINIO_PORT: ${MINIO_PORT:-9000}
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: dbase
@@ -24,10 +26,12 @@ services:
       # one is the Docker-internal service name the backend uses to actually reach MinIO, which
       # is meaningless to a real browser. This is the host a browser can reach MinIO's S3 API on
       # to actually load a presigned URL — defaults to this machine's own address since MinIO's
-      # port 9000 is published to the host below. Set to this server's real public
+      # port is published to the host below. Set to this server's real public
       # domain/IP for a non-local deployment.
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost}
-      MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-9000}
+      # Defaults to MINIO_PORT above (not always 9000) — if you changed MINIO_PORT, this tracks it
+      # automatically unless MINIO_PUBLIC_PORT is set explicitly for a fronting reverse proxy.
+      MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-${MINIO_PORT:-9000}}
     depends_on:
       minio:
         condition: service_healthy
@@ -47,23 +51,33 @@ services:
         # Docker-internal by default (correct for this compose file's own networking,
         # regardless of what public domain users actually visit — this URL is only ever used
         # server-side, inside the frontend container, to reach the backend container by its
-        # Docker Compose service name). Only override via .env if the frontend and backend are
-        # NOT both running under this same docker-compose.yml (e.g. deployed as separate
-        # services on different hosts) — in that case, set it to wherever the backend is
-        # actually reachable FROM the frontend container.
-        BACKEND_URL: ${BACKEND_URL:-http://backend:3000}
+        # Docker Compose service name). Tracks PORT above automatically. Only override via .env
+        # if the frontend and backend are NOT both running under this same docker-compose.yml
+        # (e.g. deployed as separate services on different hosts) — in that case, set it to
+        # wherever the backend is actually reachable FROM the frontend container.
+        BACKEND_URL: ${BACKEND_URL:-http://backend:${PORT:-3000}}
     ports:
-      - "3001:3001"
+      # Both sides driven by the same var (root .env's FRONTEND_PORT) — change it if 3001 is
+      # already taken on this machine. See .env.example.
+      - "${FRONTEND_PORT:-3001}:${FRONTEND_PORT:-3001}"
+    environment:
+      # Runtime, unlike BACKEND_URL above — Next's standalone server.js reads this directly at
+      # container start, so no rebuild needed just to change the port.
+      PORT: ${FRONTEND_PORT:-3001}
     depends_on:
       - backend
     restart: unless-stopped
 
   minio:
     image: minio/minio:latest
-    command: server /data --console-address ":9001"
+    # --address / --console-address (rather than leaving the S3 API on its 9000 default) so the
+    # var below drives the container's actual listening port too, not just the host-side publish
+    # — keeps both sides of the "ports:" mapping numerically identical, same reasoning as PORT
+    # above.
+    command: server /data --address ":${MINIO_PORT:-9000}" --console-address ":${MINIO_CONSOLE_PORT:-9001}"
     ports:
-      - "9000:9000" # S3 API
-      - "9001:9001" # web console
+      - "${MINIO_PORT:-9000}:${MINIO_PORT:-9000}" # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:${MINIO_CONSOLE_PORT:-9001}" # web console
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -87,12 +101,13 @@ services:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc alias set local http://minio:$$MINIO_PORT $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
       mc mb --ignore-existing local/dbase
       "
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_PORT: ${MINIO_PORT:-9000}
 
 volumes:
   minio-data:

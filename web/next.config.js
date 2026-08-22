@@ -1,5 +1,12 @@
 const path = require("node:path");
 
+// The frontend has no env file of its own — it shares the repo's single root .env (see
+// .env.example at the repo root). dotenv never overwrites a var that's already set in
+// process.env, so this is a no-op both in Docker (where BACKEND_URL/PORT arrive via
+// docker-compose.yml instead, and this file doesn't even exist inside the build context) and
+// whenever a shell has already exported these itself.
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Docker deployment (decision: Ubuntu host, Docker wherever possible) needs a minimal,
@@ -21,7 +28,15 @@ const nextConfig = {
   // running the built container and seeing the proxy hit localhost:3000 instead of backend:3000
   // despite the container's own environment being correct.
   async rewrites() {
-    const backendUrl = process.env.BACKEND_URL ?? "http://localhost:3000";
+    // Non-Docker default: frontend and backend are two processes on the same machine, so the
+    // backend's own port (root .env's PORT) is reachable at localhost:<that port>. Docker
+    // overrides BACKEND_URL explicitly (docker-compose.yml) to Docker-internal "backend:<port>"
+    // instead. BACKEND_PORT (not PORT) below because scripts/with-frontend-port.js overwrites
+    // process.env.PORT with FRONTEND_PORT before this file ever runs, for Next's own bind — see
+    // its comment. Plain `next build` (no wrapper) never touches PORT, so it's still the
+    // backend's port there and the process.env.PORT fallback covers that case.
+    const backendUrl =
+      process.env.BACKEND_URL ?? `http://localhost:${process.env.BACKEND_PORT ?? process.env.PORT ?? 3000}`;
     return [
       {
         source: "/api/v1/:path*",
