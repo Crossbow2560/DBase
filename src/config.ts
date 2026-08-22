@@ -8,6 +8,19 @@ function requireEnv(name: string): string {
   return value;
 }
 
+// The minio SDK's `endPoint` option wants a bare hostname — a full "https://host" throws
+// InvalidEndpointError at construction time, an easy mistake since MINIO_PUBLIC_ENDPOINT is
+// exactly the kind of value people naturally type as a URL (e.g. a domain fronting MinIO through
+// a tunnel/reverse proxy). Stripping the scheme here means that mistake degrades to "SSL setting
+// silently inferred from the URL you gave" instead of a crash loop; useSSL below still wins if
+// set explicitly.
+function parseEndpoint(value: string): { host: string; sslFromScheme?: boolean } {
+  const match = value.match(/^(https?):\/\/(.+?)\/?$/i);
+  if (!match) return { host: value };
+  const [, scheme, host] = match;
+  return { host: host!, sslFromScheme: scheme!.toLowerCase() === "https" };
+}
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "dbase_session",
@@ -23,18 +36,8 @@ export const config = {
   // REQUIREMENTS.md §5.4: an item is automatically purged 30 days after its own trashing time.
   trashRetentionDays: Number(process.env.TRASH_RETENTION_DAYS ?? 30),
 
-  minio: {
-    // Defaults match docker-compose.yml's service name/port for the containerized deployment;
-    // local (non-Docker) dev overrides via .env to point at a standalone `docker compose up
-    // minio` or any other S3-compatible endpoint. This is the endpoint the BACKEND container
-    // itself uses to reach MinIO over the Docker-internal network — never handed to a browser.
-    endpoint: process.env.MINIO_ENDPOINT ?? "localhost",
-    port: Number(process.env.MINIO_PORT ?? 9000),
-    useSSL: process.env.MINIO_USE_SSL === "true",
-    accessKey: requireEnv("MINIO_ACCESS_KEY"),
-    secretKey: requireEnv("MINIO_SECRET_KEY"),
-    bucket: process.env.MINIO_BUCKET ?? "dbase",
-
+  minio: (() => {
+    const endpoint = parseEndpoint(process.env.MINIO_ENDPOINT ?? "localhost");
     // Real bug, found by actually loading a thumbnail in a browser rather than only verifying
     // presigned URLs from inside the Docker network (docker exec): a presigned URL built from
     // the internal `endpoint` above (the Docker Compose service name "minio") is meaningless to
@@ -44,8 +47,28 @@ export const config = {
     // reaches it internally. Defaults to the internal endpoint/port so behavior is unchanged for
     // any deployment that hasn't set this — self-hosted deployments proxying MinIO through a
     // public domain, or exposing its S3 port directly, must set this explicitly.
-    publicEndpoint: process.env.MINIO_PUBLIC_ENDPOINT ?? process.env.MINIO_ENDPOINT ?? "localhost",
-    publicPort: Number(process.env.MINIO_PUBLIC_PORT ?? process.env.MINIO_PORT ?? 9000),
-    publicUseSSL: (process.env.MINIO_PUBLIC_USE_SSL ?? process.env.MINIO_USE_SSL) === "true",
-  },
+    const publicEndpoint = parseEndpoint(process.env.MINIO_PUBLIC_ENDPOINT ?? process.env.MINIO_ENDPOINT ?? "localhost");
+
+    return {
+      // Defaults match docker-compose.yml's service name/port for the containerized deployment;
+      // local (non-Docker) dev overrides via .env to point at a standalone `docker compose up
+      // minio` or any other S3-compatible endpoint. This is the endpoint the BACKEND container
+      // itself uses to reach MinIO over the Docker-internal network — never handed to a browser.
+      endpoint: endpoint.host,
+      port: Number(process.env.MINIO_PORT ?? 9000),
+      useSSL: process.env.MINIO_USE_SSL != null ? process.env.MINIO_USE_SSL === "true" : (endpoint.sslFromScheme ?? false),
+      accessKey: requireEnv("MINIO_ACCESS_KEY"),
+      secretKey: requireEnv("MINIO_SECRET_KEY"),
+      bucket: process.env.MINIO_BUCKET ?? "dbase",
+
+      publicEndpoint: publicEndpoint.host,
+      publicPort: Number(process.env.MINIO_PUBLIC_PORT ?? process.env.MINIO_PORT ?? 9000),
+      publicUseSSL:
+        process.env.MINIO_PUBLIC_USE_SSL != null
+          ? process.env.MINIO_PUBLIC_USE_SSL === "true"
+          : process.env.MINIO_USE_SSL != null
+            ? process.env.MINIO_USE_SSL === "true"
+            : (publicEndpoint.sslFromScheme ?? false),
+    };
+  })(),
 };
