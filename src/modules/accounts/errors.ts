@@ -32,3 +32,9 @@ export const weakPassword = () =>
 
 export const userNotFoundByEmail = () =>
   new AppError(404, "NOT_FOUND", "No account found with that email address.");
+
+export const emailNotVerified = () =>
+  new AppError(403, "EMAIL_NOT_VERIFIED", "Please verify your email address before logging in.");
+
+export const invalidVerificationToken = () =>
+  new AppError(400, "INVALID_VERIFICATION_TOKEN", "This verification link is invalid or has expired.");

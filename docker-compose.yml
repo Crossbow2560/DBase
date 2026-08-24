@@ -13,6 +13,16 @@ services:
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
       DEFAULT_USER_QUOTA_BYTES: ${DEFAULT_USER_QUOTA_BYTES:-16106127360}
       PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
+      EMAIL_VERIFICATION_TTL_HOURS: ${EMAIL_VERIFICATION_TTL_HOURS:-24}
+      # The link a verification/password-reset email points at — must be wherever a real browser
+      # can reach the frontend, same "change this for a non-localhost deployment" category as
+      # MINIO_PUBLIC_ENDPOINT below. Defaults to this compose topology's own local dev address.
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:${FRONTEND_PORT:-3001}}
+      # Unset by default — sendEmail() (src/lib/email.ts) falls back to logging the message
+      # instead of failing when this is empty, so registration/password-reset still work
+      # end-to-end without real email infra configured. Set both to actually send email.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-onboarding@resend.dev}
       PORT: ${PORT:-3000}
       # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
       # IMPLEMENTATION_PHASES.md Subcomponent 1) that will actually talk to MinIO isn't built.

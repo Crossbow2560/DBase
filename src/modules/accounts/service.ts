@@ -3,6 +3,7 @@ import { db } from "../../db.js";
 import { config } from "../../config.js";
 import { hashPassword, verifyPassword, isPasswordStrongEnough } from "../../lib/password.js";
 import { generateToken, hashToken } from "../../lib/tokens.js";
+import { sendEmail } from "../../lib/email.js";
 import {
   registrationFailed,
   invalidCredentials,
@@ -11,10 +12,41 @@ import {
   invalidResetToken,
   weakPassword,
   userNotFoundByEmail,
+  emailNotVerified,
+  invalidVerificationToken,
 } from "./errors.js";
 
 const POSTGRES_UNIQUE_VIOLATION = "P2002";
 
+/**
+ * Sends (or re-sends) a verification link — shared by register() and resendVerificationEmail()
+ * so both go through the exact same token-issuance and email-content path.
+ */
+async function sendVerificationEmail(user: { id: string; email: string; display_name: string }): Promise<void> {
+  const rawToken = generateToken();
+  const expiresAt = new Date(Date.now() + config.emailVerificationTtlHours * 60 * 60 * 1000);
+
+  await db.email_verification_tokens.create({
+    data: { user_id: user.id, token_hash: hashToken(rawToken), expires_at: expiresAt },
+  });
+
+  const verifyUrl = `${config.publicAppUrl}/verify-email?token=${encodeURIComponent(rawToken)}`;
+  await sendEmail(
+    user.email,
+    "Verify your email address",
+    `<p>Hi ${user.display_name},</p>
+     <p>Confirm this is your email address to finish setting up your DBase account:</p>
+     <p><a href="${verifyUrl}">${verifyUrl}</a></p>
+     <p>This link expires in ${config.emailVerificationTtlHours} hours. If you didn't create this account, you can ignore this email.</p>`,
+  );
+}
+
+/**
+ * REQUIREMENTS.md §5.1 originally deferred email verification — added on direct request: a new
+ * account starts with email_verified=false and login() (below) refuses to issue a session until
+ * the registrant actually clicks the link this sends, closing the "anyone can type a made-up
+ * email at signup" gap.
+ */
 export async function register(input: {
   email: string;
   password: string;
@@ -26,19 +58,20 @@ export async function register(input: {
 
   const passwordHash = await hashPassword(input.password);
 
+  let user;
   try {
-    const user = await db.users.create({
+    user = await db.users.create({
       data: {
         email: input.email,
         password_hash: passwordHash,
         display_name: input.displayName,
         storage_quota_bytes: config.defaultUserQuotaBytes,
         // role is never accepted from the client — admin is never self-grantable
-        // (REQUIREMENTS.md §5.1). The column default ('user') applies.
+        // (REQUIREMENTS.md §5.1). The column default ('user') applies. email_verified's column
+        // default (false) applies too — verification-blocks-login is the point of this feature.
       },
       select: { id: true, email: true, display_name: true, created_at: true },
     });
-    return user;
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === POSTGRES_UNIQUE_VIOLATION) {
       // Non-enumerating: same generic error as any other registration failure.
@@ -46,6 +79,9 @@ export async function register(input: {
     }
     throw err;
   }
+
+  await sendVerificationEmail(user);
+  return user;
 }
 
 export async function login(input: { email: string; password: string; deviceInfo?: string }) {
@@ -61,6 +97,12 @@ export async function login(input: { email: string; password: string; deviceInfo
 
   if (!user.is_active) {
     throw accountDeactivated();
+  }
+
+  // Checked after the password (never before) — a wrong-password attempt against an unverified
+  // account must still look identical to a wrong-password attempt against a verified one.
+  if (!user.email_verified) {
+    throw emailNotVerified();
   }
 
   const rawToken = generateToken();
@@ -144,6 +186,25 @@ export async function lookupUserByEmail(email: string) {
   return { id: user.id, email: user.email, displayName: user.display_name };
 }
 
+export async function verifyEmail(rawToken: string): Promise<void> {
+  const tokenRow = await db.email_verification_tokens.findUnique({ where: { token_hash: hashToken(rawToken) } });
+  if (!tokenRow || tokenRow.used_at !== null || tokenRow.expires_at < new Date()) {
+    throw invalidVerificationToken();
+  }
+
+  await db.$transaction([
+    db.users.update({ where: { id: tokenRow.user_id }, data: { email_verified: true } }),
+    db.email_verification_tokens.update({ where: { id: tokenRow.id }, data: { used_at: new Date() } }),
+  ]);
+}
+
+/** Non-enumerating, same as requestPasswordReset below — always behaves identically either way. */
+export async function resendVerificationEmail(email: string): Promise<void> {
+  const user = await db.users.findUnique({ where: { email } });
+  if (!user || user.email_verified) return;
+  await sendVerificationEmail(user);
+}
+
 export async function getStorageUsage(userId: string) {
   const user = await db.users.findUniqueOrThrow({
     where: { id: userId },
@@ -169,9 +230,15 @@ export async function requestPasswordReset(email: string) {
     data: { user_id: user.id, token_hash: hashToken(rawToken), expires_at: expiresAt },
   });
 
-  // TODO: wire a real email provider. For now, the reset link is logged so the flow is
-  // exercisable end-to-end in development.
-  console.log(`[password-reset] token for ${email}: ${rawToken} (expires ${expiresAt.toISOString()})`);
+  const resetUrl = `${config.publicAppUrl}/password-reset/confirm?token=${encodeURIComponent(rawToken)}`;
+  await sendEmail(
+    email,
+    "Reset your password",
+    `<p>Hi ${user.display_name},</p>
+     <p>Someone requested a password reset for this account. If that was you, choose a new password here:</p>
+     <p><a href="${resetUrl}">${resetUrl}</a></p>
+     <p>This link expires in ${config.passwordResetTtlMinutes} minutes. If you didn't request this, you can ignore this email.</p>`,
+  );
 }
 
 export async function confirmPasswordReset(rawToken: string, newPassword: string) {

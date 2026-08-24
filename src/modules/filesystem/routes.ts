@@ -90,6 +90,27 @@ export async function filesystemRoutes(app: FastifyInstance) {
     },
   );
 
+  // REQUIREMENTS.md §5.5 marks this out of scope for the original phase — built anyway on direct
+  // request. No rate limit, same reasoning as the upload-part endpoint below: bounded by the
+  // folder's own contents and this being a slow streamed response, not a generic per-minute
+  // request count. Streamed directly (folders.getFolderZipArchive's archive is a readable
+  // stream), not buffered to a temp file first — the response starts as soon as the first file's
+  // bytes are ready, not after the whole zip is built.
+  app.get(
+    "/api/v1/folders/:id/download-zip",
+    { preHandler: requireSession, ...noRateLimit },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const { archive, folderName } = await folders.getFolderZipArchive(request.session!.user_id, id);
+      reply.header("Content-Type", "application/zip");
+      reply.header(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent(folderName)}.zip`,
+      );
+      return reply.send(archive);
+    },
+  );
+
   app.patch(
     "/api/v1/files/:id",
     { preHandler: requireSession, ...writeHeavyRateLimit },

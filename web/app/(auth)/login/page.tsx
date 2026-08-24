@@ -12,12 +12,16 @@ export default function LoginPage() {
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
+  const [needsVerification, setNeedsVerification] = React.useState(false);
+  const [resendSent, setResendSent] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const { refetch } = useAuth();
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setNeedsVerification(false);
+    setResendSent(false);
     setIsSubmitting(true);
     try {
       await api.post("/auth/login", { email, password });
@@ -29,10 +33,18 @@ export default function LoginPage() {
       // while the UI was still showing the login form). One source of truth for this redirect.
       await refetch();
     } catch (err) {
+      if (err instanceof ApiError && err.code === "EMAIL_NOT_VERIFIED") {
+        setNeedsVerification(true);
+      }
       setError(err instanceof ApiError ? err.message : "Something went wrong.");
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  async function resendVerification() {
+    await api.post("/auth/resend-verification", { email });
+    setResendSent(true);
   }
 
   return (
@@ -46,9 +58,17 @@ export default function LoginPage() {
         <h1 className="text-xl font-semibold">Log in</h1>
 
         {error && (
-          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            {error}
-          </p>
+          <div className="space-y-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <p>{error}</p>
+            {needsVerification &&
+              (resendSent ? (
+                <p className="text-foreground">New verification link sent — check your email.</p>
+              ) : (
+                <button type="button" onClick={resendVerification} className="font-medium underline">
+                  Resend verification email
+                </button>
+              ))}
+          </div>
         )}
 
         <div className="space-y-1.5">

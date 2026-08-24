@@ -2,8 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { User, Mail, Lock, ArrowRight } from "lucide-react";
+import { User, Mail, Lock, ArrowRight, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api-client";
@@ -14,7 +13,7 @@ export default function RegisterPage() {
   const [displayName, setDisplayName] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const router = useRouter();
+  const [registeredEmail, setRegisteredEmail] = React.useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -22,12 +21,33 @@ export default function RegisterPage() {
     setIsSubmitting(true);
     try {
       await api.post("/auth/register", { email, password, displayName });
-      router.replace("/login");
+      // Not a redirect to /login: the account can't log in yet until the verification link is
+      // followed (accounts/service.ts's login() blocks on email_verified) — sending someone
+      // straight to a login form they can't successfully use yet would just be confusing.
+      setRegisteredEmail(email);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong.");
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  if (registeredEmail) {
+    return (
+      <div className="mx-auto w-full max-w-sm">
+        <div className="space-y-3 rounded-2xl border border-border bg-background/70 p-6 text-center shadow-xl shadow-[#1A3D63]/5 backdrop-blur-xl">
+          <MailCheck className="mx-auto h-8 w-8 text-accent" aria-hidden />
+          <h1 className="text-lg font-semibold">Check your email</h1>
+          <p className="text-sm text-muted-foreground">
+            We sent a verification link to <span className="font-medium text-foreground">{registeredEmail}</span>.
+            Follow it to activate your account before logging in.
+          </p>
+          <Link href="/login" className="inline-block text-sm font-medium text-accent hover:underline">
+            Back to log in
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   return (

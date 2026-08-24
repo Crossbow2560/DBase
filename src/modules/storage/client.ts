@@ -1,5 +1,6 @@
 import { Client as MinioClient, CopySourceOptions, CopyDestinationOptions } from "minio";
 import { randomBytes } from "node:crypto";
+import type { Readable } from "node:stream";
 import { config } from "../../config.js";
 
 // APPLICATION_DESIGN.md §1.3/§3.2: the ONLY module permitted to construct or dereference a
@@ -149,6 +150,15 @@ export async function getObjectBuffer(storageKey: string): Promise<Buffer> {
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks);
+}
+
+/**
+ * The raw object stream, not buffered — used by the folder-zip download (filesystem module) so
+ * building a zip of a folder full of large files doesn't hold every one of them fully in memory
+ * at once; each file streams straight from MinIO into the zip archive as it's added.
+ */
+export async function getObjectStream(storageKey: string): Promise<Readable> {
+  return client.getObject(BUCKET, storageKey);
 }
 
 export async function putThumbnail(thumbnailKey: string, data: Buffer): Promise<void> {

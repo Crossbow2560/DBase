@@ -163,6 +163,35 @@ export async function accountRoutes(app: FastifyInstance) {
   );
 
   app.post(
+    "/api/v1/auth/verify-email",
+    {
+      schema: { body: { type: "object", required: ["token"], properties: { token: { type: "string" } } } },
+    },
+    async (request, reply) => {
+      const { token } = request.body as { token: string };
+      await accounts.verifyEmail(token);
+      reply.send({ message: "Email verified. You can now log in." });
+    },
+  );
+
+  app.post(
+    "/api/v1/auth/resend-verification",
+    {
+      ...unauthenticatedRateLimit,
+      schema: {
+        body: { type: "object", required: ["email"], properties: { email: emailSchema } },
+      },
+    },
+    async (request, reply) => {
+      const { email } = request.body as { email: string };
+      await accounts.resendVerificationEmail(email);
+      // Always 200, regardless of whether the email exists or is already verified — same
+      // non-enumeration reasoning as password-reset/request below.
+      reply.send({ message: "If that email is registered and unverified, a new link has been sent." });
+    },
+  );
+
+  app.post(
     "/api/v1/auth/password-reset/confirm",
     {
       schema: {

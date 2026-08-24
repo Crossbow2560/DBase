@@ -260,6 +260,14 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
     if (tab) tab.location.href = url;
   }
 
+  // Unlike downloadFile above, this URL is already known synchronously (a same-origin backend
+  // route, not a presigned S3 URL fetched via an async lookup first) — no need for the
+  // open-a-blank-tab-then-redirect dance, a plain synchronous window.open() is still a direct
+  // result of the click and won't get popup-blocked.
+  function downloadFolderZip(item: FolderContentsItem) {
+    window.open(`/api/v1/folders/${item.id}/download-zip`, "_blank");
+  }
+
   function onFilesSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
     if (!files) return;
@@ -337,9 +345,11 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
       },
       { label: "Tags", icon: Tags, onSelect: () => setTagsItem(item) },
       { label: "Share", icon: Share2, onSelect: () => setShareItem(item) },
-      ...(item.type === "file"
-        ? [{ label: "Download", icon: Download, onSelect: () => downloadFile(item) }]
-        : []),
+      {
+        label: item.type === "folder" ? "Download as ZIP" : "Download",
+        icon: Download,
+        onSelect: () => (item.type === "folder" ? downloadFolderZip(item) : downloadFile(item)),
+      },
       { label: "Delete", icon: Trash2, onSelect: () => deleteItem(item), destructive: true },
     ];
   }

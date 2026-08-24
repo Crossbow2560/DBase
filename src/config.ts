@@ -27,7 +27,24 @@ export const config = {
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS ?? 30),
   defaultUserQuotaBytes: BigInt(process.env.DEFAULT_USER_QUOTA_BYTES ?? "16106127360"), // 15 GiB
   passwordResetTtlMinutes: Number(process.env.PASSWORD_RESET_TTL_MINUTES ?? 30),
+  emailVerificationTtlHours: Number(process.env.EMAIL_VERIFICATION_TTL_HOURS ?? 24),
   databaseUrl: requireEnv("DATABASE_URL"),
+
+  // The frontend's own public origin — needed to build a real clickable link in an email (both
+  // verification and password reset), as opposed to a bare token. Defaults to this compose
+  // topology's local dev address; must be set to the real public domain for any other deployment
+  // (same "things that need to change for a non-localhost deployment" category as
+  // MINIO_PUBLIC_ENDPOINT — see .env's comment on that one).
+  publicAppUrl: (process.env.PUBLIC_APP_URL ?? "http://localhost:3001").replace(/\/$/, ""),
+
+  email: {
+    // Left unset in dev by default — sendEmail() (lib/email.ts) falls back to logging the
+    // message instead of failing outright, the same non-breaking-default pattern
+    // requestPasswordReset() already used before this feature existed. Required for either
+    // verification emails or password-reset emails to actually reach anyone.
+    resendApiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM ?? "onboarding@resend.dev",
+  },
 
   // DESIGN.md §3.5: an upload session not resumed within this window is abandoned and cleaned
   // up by the background worker (src/workers/upload-session-cleanup.ts).

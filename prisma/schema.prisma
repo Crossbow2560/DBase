@@ -46,11 +46,13 @@ model users {
   storage_quota_bytes BigInt    @default(0)
   storage_used_bytes  BigInt    @default(0)
   is_active           Boolean   @default(true)
+  email_verified      Boolean   @default(false)
   created_at          DateTime  @default(now()) @db.Timestamptz(6)
   updated_at          DateTime  @default(now()) @db.Timestamptz(6)
 
-  sessions              sessions[]
-  password_reset_tokens password_reset_tokens[]
+  sessions                 sessions[]
+  password_reset_tokens    password_reset_tokens[]
+  email_verification_tokens email_verification_tokens[]
   owned_folders         folders[]        @relation("folder_owner")
   owned_files           files[]          @relation("file_owner")
   upload_sessions       upload_sessions[]
@@ -372,6 +374,19 @@ model deletion_queue {
 }
 
 model password_reset_tokens {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id    String    @db.Uuid
+  token_hash String    @unique
+  expires_at DateTime  @db.Timestamptz(6)
+  used_at    DateTime? @db.Timestamptz(6)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+}
+
+model email_verification_tokens {
   id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   user_id    String    @db.Uuid
   token_hash String    @unique

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { ZipArchive } from "archiver";
 import { Prisma } from "@prisma/client";
 import { db } from "../../db.js";
+import * as storage from "../storage/client.js";
 import { normalizeName, assertPathLengthOk } from "./normalize.js";
 import { nameCollision, folderNotFound, cycleDetected } from "./errors.js";
 import { checkPermission } from "../access/permission-check.js";
@@ -268,4 +270,57 @@ export async function trashFolder(userId: string, folderId: string) {
   });
 
   await logActivity({ actorId: userId, subjectUserId: folder.owner_id, itemType: "folder", itemId: folderId, action: "delete" });
+}
+
+/**
+ * REQUIREMENTS.md §5.5 explicitly marks packaged-archive download as out of scope for the
+ * original phase ("downloading individual files within it is sufficient") — added anyway as a
+ * deliberate scope addition on direct request. Streams every descendant file straight from MinIO
+ * into the zip as it's built (storage.getObjectStream, not getObjectBuffer) so a folder full of
+ * large files doesn't need to sit fully in this process's memory at once; the archive itself is
+ * a readable stream the caller pipes directly to the HTTP response as it's produced, rather than
+ * being built to completion and then sent.
+ */
+export async function getFolderZipArchive(userId: string, folderId: string) {
+  if (!(await checkPermission(userId, "folder", folderId, "viewer"))) throw folderNotFound();
+  const folder = await db.folders.findFirst({ where: { id: folderId, deleted_at: null } });
+  if (!folder) throw folderNotFound();
+
+  // archiver 8.x's API: no more default-export factory function (`archiver("zip", opts)` from
+  // older versions) — a format-specific class instead.
+  const archive = new ZipArchive({ zlib: { level: 9 } });
+
+  // Descendant items can be authorized purely via the top folder's own grant (DESIGN.md's
+  // dynamic-folder-sharing model, same reasoning as getFolderContents/trashFolder above) — no
+  // per-descendant permission check needed once the root folder itself has cleared viewer access.
+  async function addFolderContents(currentFolderId: string, prefix: string): Promise<void> {
+    const [subfolders, files] = await Promise.all([
+      db.folders.findMany({ where: { parent_folder_id: currentFolderId, deleted_at: null }, orderBy: { name: "asc" } }),
+      db.files.findMany({ where: { folder_id: currentFolderId, deleted_at: null }, orderBy: { name: "asc" } }),
+    ]);
+
+    for (const file of files) {
+      const stream = await storage.getObjectStream(file.storage_key);
+      archive.append(stream, { name: prefix + file.name });
+    }
+    for (const subfolder of subfolders) {
+      await addFolderContents(subfolder.id, `${prefix}${subfolder.name}/`);
+    }
+  }
+
+  // Populated asynchronously in the background — archiver is itself a readable stream the route
+  // starts piping to the response immediately, and its internal queue applies backpressure to
+  // this population loop as needed rather than requiring the whole zip to be assembled upfront.
+  (async () => {
+    try {
+      await addFolderContents(folderId, "");
+      await archive.finalize();
+    } catch (err) {
+      archive.destroy(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  await logActivity({ actorId: userId, subjectUserId: folder.owner_id, itemType: "folder", itemId: folderId, action: "download" });
+
+  return { archive, folderName: folder.name };
 }
