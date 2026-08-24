@@ -19,6 +19,10 @@ services:
       # Present now so the container topology and secrets are already in place when it is.
       MINIO_ENDPOINT: minio
       MINIO_PORT: ${MINIO_PORT:-9000}
+      # The Docker-internal MinIO container talks plain HTTP over the compose network — this has
+      # no reason to ever be true, but it's still wired through .env for consistency/completeness
+      # rather than silently hardcoded, in case someone terminates TLS in front of MinIO itself.
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: dbase
@@ -32,6 +36,11 @@ services:
       # Defaults to MINIO_PORT above (not always 9000) — if you changed MINIO_PORT, this tracks it
       # automatically unless MINIO_PUBLIC_PORT is set explicitly for a fronting reverse proxy.
       MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-${MINIO_PORT:-9000}}
+      # Was previously missing from this environment block entirely — setting it in .env alone
+      # did nothing, since Compose only forwards vars a service's `environment:` explicitly names.
+      # Matters whenever MinIO sits behind a TLS-terminating proxy (e.g. a Cloudflare Tunnel
+      # hostname), which needs this true even though MINIO_USE_SSL above stays false.
+      MINIO_PUBLIC_USE_SSL: ${MINIO_PUBLIC_USE_SSL:-false}
     depends_on:
       minio:
         condition: service_healthy

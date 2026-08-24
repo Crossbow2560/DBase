@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { Mail, Lock, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api-client";
@@ -35,34 +36,86 @@ export default function LoginPage() {
   }
 
   return (
-    <form onSubmit={onSubmit} className="w-full max-w-sm space-y-4 rounded-lg border border-border p-6">
-      <h1 className="text-xl font-semibold">Log in</h1>
-      {error && <p className="text-sm text-destructive">{error}</p>}
-      <div className="space-y-2">
-        <label htmlFor="email" className="text-sm font-medium">
-          Email
-        </label>
-        <Input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-      </div>
-      <div className="space-y-2">
-        <label htmlFor="password" className="text-sm font-medium">
-          Password
-        </label>
-        <Input
-          id="password"
-          type="password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-      </div>
-      <Button type="submit" disabled={isSubmitting} className="w-full">
-        {isSubmitting ? "Logging in…" : "Log in"}
-      </Button>
-      <div className="flex justify-between text-sm text-muted-foreground">
-        <Link href="/register">Create an account</Link>
-        <Link href="/password-reset/request">Forgot password?</Link>
-      </div>
-    </form>
+    <div className="mx-auto w-full max-w-sm">
+      <p className="mb-6 text-center text-sm text-muted-foreground">Welcome back — log in to continue</p>
+
+      <form
+        onSubmit={onSubmit}
+        className="space-y-4 rounded-2xl border border-border bg-background/70 p-6 shadow-xl shadow-[#1A3D63]/5 backdrop-blur-xl"
+      >
+        <h1 className="text-xl font-semibold">Log in</h1>
+
+        {error && (
+          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {error}
+          </p>
+        )}
+
+        <div className="space-y-1.5">
+          <label htmlFor="email" className="text-sm font-medium">
+            Email
+          </label>
+          <div className="relative">
+            <Mail
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <Input
+              id="email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <label htmlFor="password" className="text-sm font-medium">
+              Password
+            </label>
+            <Link href="/password-reset/request" className="text-xs text-accent hover:underline">
+              Forgot password?
+            </Link>
+          </div>
+          <div className="relative">
+            <Lock
+              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <Input
+              id="password"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="pl-9"
+            />
+          </div>
+        </div>
+
+        <Button type="submit" disabled={isSubmitting} className="w-full">
+          {isSubmitting ? (
+            "Logging in…"
+          ) : (
+            <>
+              Log in
+              <ArrowRight className="ml-1.5 h-4 w-4" aria-hidden />
+            </>
+          )}
+        </Button>
+      </form>
+
+      <p className="mt-4 text-center text-sm text-muted-foreground">
+        Don&apos;t have an account?{" "}
+        <Link href="/register" className="font-medium text-accent hover:underline">
+          Create one
+        </Link>
+      </p>
+    </div>
   );
 }
