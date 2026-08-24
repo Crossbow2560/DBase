@@ -145,6 +145,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);
       updateTask(id, { status: "complete", uploadedBytes: internal.file.size });
       queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
+      // Was missing entirely — completion only ever refreshed the quota indicator, never the
+      // folder listing itself, so a newly-uploaded file didn't show up anywhere (/home,
+      // /folders, or the target subfolder) until some unrelated action happened to refetch it.
+      queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(internal.task.folderId) });
     } catch (err) {
       // A failure here (network error, a later part rejected for quota, destination no longer
       // valid, etc.) can land after earlier parts already succeeded and had their bytes credited

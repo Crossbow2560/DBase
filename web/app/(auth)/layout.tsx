@@ -16,8 +16,12 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
 
   React.useEffect(() => {
+    // Was "/folders" — stale since /home (the actual post-login dashboard, per "/"'s own
+    // already-logged-in redirect a few lines over in app/page.tsx) was added; this was the one
+    // place that never got updated to match, so logging in landed you one level into the file
+    // browser instead of the dashboard.
     if (!isLoading && user) {
-      router.replace("/folders");
+      router.replace("/home");
     }
   }, [isLoading, user, router]);
 

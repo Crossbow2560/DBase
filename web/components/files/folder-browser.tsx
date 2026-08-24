@@ -85,6 +85,28 @@ function FileThumbnail({ fileId }: { fileId: string }) {
   return <FileText className="h-8 w-8 text-muted-foreground" aria-hidden />;
 }
 
+/**
+ * Was a hardcoded "Private" string for every row regardless of actual state — reported directly
+ * ("after sharing file tag does not change"). Same per-row-query tradeoff as FileThumbnail above:
+ * two small queries per row rather than a bulk endpoint, since none exists for "sharing summary
+ * across many items" and this list is typically small enough for it not to matter.
+ */
+function SharingBadge({ itemType, itemId }: { itemType: "file" | "folder"; itemId: string }) {
+  const { data: collaborators } = useQuery({
+    queryKey: ["items", itemType, itemId, "permissions"],
+    queryFn: () => api.get<{ collaborators: unknown[] }>(`/items/${itemType}/${itemId}/permissions`),
+    staleTime: 30_000,
+  });
+  const { data: links } = useQuery({
+    queryKey: ["items", itemType, itemId, "share-links"],
+    queryFn: () => api.get<{ links: unknown[] }>(`/items/${itemType}/${itemId}/share-links`),
+    staleTime: 30_000,
+  });
+
+  const isShared = (collaborators?.collaborators.length ?? 0) > 0 || (links?.links.length ?? 0) > 0;
+  return <>{isShared ? "Shared" : "Private"}</>;
+}
+
 interface RowAction {
   label: string;
   icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
@@ -573,7 +595,9 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                     <td className="hidden px-4 py-2.5 align-middle text-muted-foreground md:table-cell">
                       {formatDate(item.updatedAt)}
                     </td>
-                    <td className="hidden px-4 py-2.5 align-middle text-muted-foreground lg:table-cell">Private</td>
+                    <td className="hidden px-4 py-2.5 align-middle text-muted-foreground lg:table-cell">
+                      <SharingBadge itemType={item.type} itemId={item.id} />
+                    </td>
                     <td className="px-4 py-2.5 align-middle">
                       <RowActionsMenu actions={actionsFor(item)} />
                     </td>

@@ -4,9 +4,9 @@ import * as React from "react";
 import { Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Lock, ArrowRight } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { api, ApiError } from "@/lib/api-client";
 
 function ConfirmForm() {
@@ -59,22 +59,14 @@ function ConfirmForm() {
           <label htmlFor="newPassword" className="text-sm font-medium">
             New password
           </label>
-          <div className="relative">
-            <Lock
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden
-            />
-            <Input
-              id="newPassword"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              className="pl-9"
-            />
-          </div>
+          <PasswordInput
+            id="newPassword"
+            autoComplete="new-password"
+            required
+            minLength={8}
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
         </div>
         <Button type="submit" disabled={isSubmitting} className="w-full">
           {isSubmitting ? (

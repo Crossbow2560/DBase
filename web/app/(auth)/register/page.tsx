@@ -2,9 +2,10 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { User, Mail, Lock, ArrowRight, MailCheck } from "lucide-react";
+import { User, Mail, ArrowRight, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { api, ApiError } from "@/lib/api-client";
 
 export default function RegisterPage() {
@@ -111,22 +112,14 @@ export default function RegisterPage() {
           <label htmlFor="password" className="text-sm font-medium">
             Password
           </label>
-          <div className="relative">
-            <Lock
-              className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden
-            />
-            <Input
-              id="password"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="pl-9"
-            />
-          </div>
+          <PasswordInput
+            id="password"
+            autoComplete="new-password"
+            required
+            minLength={8}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
         </div>
 
         <Button type="submit" disabled={isSubmitting} className="w-full">
