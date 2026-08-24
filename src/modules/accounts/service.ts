@@ -74,10 +74,30 @@ export async function register(input: {
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === POSTGRES_UNIQUE_VIOLATION) {
-      // Non-enumerating: same generic error as any other registration failure.
-      throw registrationFailed();
+      // Real bug, reported directly: an account that never got past verification (email
+      // provider hiccup, the registrant mistyped and never received the link, they just
+      // abandoned the tab) permanently squatted its own email address — every retry hit this
+      // same unique-violation branch and rejected as REGISTRATION_FAILED, with no way back in
+      // except knowing to use the separate "resend verification" action instead of just
+      // registering again, which is what anyone would naturally try first. An unverified row has
+      // no one who could have legitimately claimed it yet (nobody's proven control of the email),
+      // so a second registration attempt against it is just treated as that same person retrying
+      // — the row is updated in place with the newly submitted password/name and a fresh
+      // verification email goes out, rather than being rejected. Only a row that's already
+      // email_verified is a genuine duplicate.
+      const existing = await db.users.findUnique({ where: { email: input.email } });
+      if (!existing || existing.email_verified) {
+        // Non-enumerating: same generic error as any other registration failure.
+        throw registrationFailed();
+      }
+      user = await db.users.update({
+        where: { id: existing.id },
+        data: { password_hash: passwordHash, display_name: input.displayName },
+        select: { id: true, email: true, display_name: true, created_at: true },
+      });
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   await sendVerificationEmail(user);
