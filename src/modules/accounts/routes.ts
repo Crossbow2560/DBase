@@ -116,6 +116,43 @@ export async function accountRoutes(app: FastifyInstance) {
     },
   );
 
+  app.patch(
+    "/api/v1/users/me",
+    {
+      preHandler: requireSession,
+      schema: {
+        body: {
+          type: "object",
+          properties: { displayName: { type: "string", minLength: 1, maxLength: 255 } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { displayName } = request.body as { displayName?: string };
+      const user = await accounts.updateProfile(request.session!.user_id, { displayName });
+      reply.send({ user });
+    },
+  );
+
+  app.post(
+    "/api/v1/auth/change-password",
+    {
+      preHandler: requireSession,
+      schema: {
+        body: {
+          type: "object",
+          required: ["currentPassword", "newPassword"],
+          properties: { currentPassword: { type: "string" }, newPassword: passwordSchema },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { currentPassword, newPassword } = request.body as { currentPassword: string; newPassword: string };
+      await accounts.changePassword(request.session!.user_id, request.session!.id, currentPassword, newPassword);
+      reply.code(204).send();
+    },
+  );
+
   // REQUIREMENTS.md §5.1.1: self-service deletion — always uses the default reassignment
   // policy (lifecycle-service.deleteAccount enforces this regardless of what's passed here).
   app.delete("/api/v1/users/me", { preHandler: requireSession }, async (request, reply) => {

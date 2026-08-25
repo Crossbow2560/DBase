@@ -6,6 +6,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Loader2, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { Button } from "@/components/ui/button";
@@ -41,10 +42,23 @@ export default function AdminUsersPage() {
     invalidate();
   }
 
-  async function deleteUser(userRow: AdminUserRow) {
-    if (!confirm(`Permanently delete ${userRow.email}? This cannot be undone.`)) return;
-    await api.delete(`/admin/users/${userRow.id}`);
-    invalidate();
+  const [deletingUser, setDeletingUser] = React.useState<AdminUserRow | null>(null);
+  const [isDeletingUser, setIsDeletingUser] = React.useState(false);
+  const [deleteUserError, setDeleteUserError] = React.useState<string | null>(null);
+
+  async function confirmDeleteUser() {
+    if (!deletingUser) return;
+    setIsDeletingUser(true);
+    setDeleteUserError(null);
+    try {
+      await api.delete(`/admin/users/${deletingUser.id}`);
+      setDeletingUser(null);
+      invalidate();
+    } catch (err) {
+      setDeleteUserError(err instanceof ApiError ? err.message : "Could not delete this user.");
+    } finally {
+      setIsDeletingUser(false);
+    }
   }
 
   async function toggleRole(userRow: AdminUserRow) {
@@ -150,7 +164,7 @@ export default function AdminUsersPage() {
                     <Button variant="outline" size="sm" onClick={() => toggleActive(userRow)}>
                       {userRow.isActive ? "Deactivate" : "Reactivate"}
                     </Button>
-                    <Button variant="destructive" size="sm" onClick={() => deleteUser(userRow)}>
+                    <Button variant="destructive" size="sm" onClick={() => setDeletingUser(userRow)}>
                       Delete
                     </Button>
                   </div>
@@ -160,6 +174,34 @@ export default function AdminUsersPage() {
           </tbody>
         </table>
       </div>
+
+      {deletingUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !isDeletingUser && setDeletingUser(null)}
+        >
+          <div className="w-full max-w-sm space-y-3 rounded-md bg-background p-4" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-sm font-semibold">Delete user</h2>
+            <p className="text-sm text-muted-foreground">
+              Permanently delete {deletingUser.email}? This cannot be undone.
+            </p>
+            {deleteUserError && <p className="text-sm text-destructive">{deleteUserError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => setDeletingUser(null)} disabled={isDeletingUser}>
+                Cancel
+              </Button>
+              <Button type="button" variant="destructive" onClick={confirmDeleteUser} disabled={isDeletingUser}>
+                {isDeletingUser ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                )}
+                Delete
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

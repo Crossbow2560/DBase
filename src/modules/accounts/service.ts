@@ -228,6 +228,47 @@ export async function resendVerificationEmail(email: string): Promise<void> {
   await sendVerificationEmail(user);
 }
 
+/** Display name only — email is intentionally not editable here (changing it would need its own re-verification flow, same as registration's, which isn't built). */
+export async function updateProfile(userId: string, updates: { displayName?: string }) {
+  const user = await db.users.update({
+    where: { id: userId },
+    data: { display_name: updates.displayName },
+    select: { id: true, email: true, display_name: true, role: true },
+  });
+  return { id: user.id, email: user.email, displayName: user.display_name, role: user.role };
+}
+
+/**
+ * Change password for an already-authenticated user — distinct from confirmPasswordReset's
+ * forgot-password flow (that one has no current password to check, and signs every session out
+ * everywhere since a reset implies the account may have been compromised). Here the requester has
+ * just proven their current password, so only every *other* session is revoked — the one making
+ * this request stays alive, same as most account-settings pages (Google, GitHub, etc.) do.
+ */
+export async function changePassword(
+  userId: string,
+  currentSessionId: string,
+  currentPassword: string,
+  newPassword: string,
+) {
+  const user = await db.users.findUniqueOrThrow({ where: { id: userId } });
+
+  const passwordMatches = await verifyPassword(currentPassword, user.password_hash);
+  if (!passwordMatches) throw invalidCredentials();
+
+  if (!isPasswordStrongEnough(newPassword)) throw weakPassword();
+
+  const newPasswordHash = await hashPassword(newPassword);
+
+  await db.$transaction([
+    db.users.update({ where: { id: userId }, data: { password_hash: newPasswordHash } }),
+    db.sessions.updateMany({
+      where: { user_id: userId, revoked_at: null, id: { not: currentSessionId } },
+      data: { revoked_at: new Date() },
+    }),
+  ]);
+}
+
 export async function getStorageUsage(userId: string) {
   const user = await db.users.findUniqueOrThrow({
     where: { id: userId },
