@@ -1,6 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { config } from "../../config.js";
-import { db } from "../../db.js";
 import { AppError } from "../accounts/errors.js";
 import { resolveSession } from "../accounts/service.js";
 import type { ItemType } from "./permission-check.js";
@@ -16,6 +15,10 @@ async function requireSession(request: FastifyRequest) {
   if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
   request.session = session;
 }
+
+// Same reasoning as filesystem/routes.ts's identical constant: a slow streamed zip response,
+// bounded by the shared folder's own contents, not a generic per-minute request count.
+const noRateLimit = { config: { rateLimit: false } } as const;
 
 function parseItemType(raw: string): ItemType {
   if (raw !== "file" && raw !== "folder") {
@@ -121,32 +124,48 @@ export async function accessRoutes(app: FastifyInstance) {
     reply.send({ links });
   });
 
-  // Deliberately no requireSession — REQUIREMENTS.md §5.5: access without an account.
+  // Deliberately no requireSession on any /public/share-links/* route below — REQUIREMENTS.md
+  // §5.5: access without an account. `folderId` lets a folder-type link's visitor browse into
+  // subfolders; share-link-service.ts's own scope check (not checkPermission — there's no
+  // userId) is what keeps that walk confined to the shared subtree.
   app.get("/api/v1/public/share-links/:token", async (request, reply) => {
     const { token } = request.params as { token: string };
-    const { password } = request.query as { password?: string };
-    const link = await shareLinks.resolveShareLink(token, password);
-
-    if (link.item_type === "file") {
-      const file = await db.files.findFirst({ where: { id: link.item_id, deleted_at: null } });
-      if (!file) throw new AppError(404, "NOT_FOUND", "This link is invalid, expired, or no longer available.");
-      reply.send({ name: file.name, role: link.role, items: [] });
-      return;
-    }
-
-    const folder = await db.folders.findFirst({ where: { id: link.item_id, deleted_at: null } });
-    if (!folder) throw new AppError(404, "NOT_FOUND", "This link is invalid, expired, or no longer available.");
-    const [subFolders, files] = await Promise.all([
-      db.folders.findMany({ where: { parent_folder_id: folder.id, deleted_at: null } }),
-      db.files.findMany({ where: { folder_id: folder.id, deleted_at: null } }),
-    ]);
-    reply.send({
-      name: folder.name,
-      role: link.role,
-      items: [
-        ...subFolders.map((f) => ({ id: f.id, name: f.name, type: "folder" as const })),
-        ...files.map((f) => ({ id: f.id, name: f.name, type: "file" as const })),
-      ],
-    });
+    const { password, folderId } = request.query as { password?: string; folderId?: string };
+    const contents = await shareLinks.getPublicFolderContents(token, password, folderId);
+    reply.send(contents);
   });
+
+  app.get("/api/v1/public/share-links/:token/files/:fileId/download", async (request, reply) => {
+    const { token, fileId } = request.params as { token: string; fileId: string };
+    const { password } = request.query as { password?: string };
+    const url = await shareLinks.getPublicDownloadUrl(token, password, fileId);
+    reply.send({ url });
+  });
+
+  app.get("/api/v1/public/share-links/:token/files/:fileId/preview", async (request, reply) => {
+    const { token, fileId } = request.params as { token: string; fileId: string };
+    const { password } = request.query as { password?: string };
+    const preview = await shareLinks.getPublicPreviewUrl(token, password, fileId);
+    reply.send(preview ? { available: true, ...preview } : { available: false });
+  });
+
+  app.get("/api/v1/public/share-links/:token/files/:fileId/thumbnail", async (request, reply) => {
+    const { token, fileId } = request.params as { token: string; fileId: string };
+    const { password } = request.query as { password?: string };
+    const url = await shareLinks.getPublicThumbnailUrl(token, password, fileId);
+    reply.send(url ? { available: true, url } : { available: false });
+  });
+
+  app.get(
+    "/api/v1/public/share-links/:token/folders/:folderId/download-zip",
+    { ...noRateLimit },
+    async (request, reply) => {
+      const { token, folderId } = request.params as { token: string; folderId: string };
+      const { password } = request.query as { password?: string };
+      const { archive, folderName } = await shareLinks.getPublicFolderZipArchive(token, password, folderId);
+      reply.header("Content-Type", "application/zip");
+      reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(folderName)}.zip`);
+      return reply.send(archive);
+    },
+  );
 }

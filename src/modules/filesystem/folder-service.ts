@@ -286,6 +286,20 @@ export async function getFolderZipArchive(userId: string, folderId: string) {
   const folder = await db.folders.findFirst({ where: { id: folderId, deleted_at: null } });
   if (!folder) throw folderNotFound();
 
+  const archive = buildFolderZipArchive(folderId);
+
+  await logActivity({ actorId: userId, subjectUserId: folder.owner_id, itemType: "folder", itemId: folderId, action: "download" });
+
+  return { archive, folderName: folder.name };
+}
+
+/**
+ * The archive-building half of getFolderZipArchive above, split out so a caller who has already
+ * authorized access some other way (e.g. share-link-service.ts's own token/scope check for a
+ * public share link, which has no userId to run checkPermission against) can build the same zip
+ * without going through this module's session-based authorization.
+ */
+export function buildFolderZipArchive(folderId: string): ZipArchive {
   // archiver 8.x's API: no more default-export factory function (`archiver("zip", opts)` from
   // older versions) — a format-specific class instead.
   const archive = new ZipArchive({ zlib: { level: 9 } });
@@ -320,7 +334,5 @@ export async function getFolderZipArchive(userId: string, folderId: string) {
     }
   })();
 
-  await logActivity({ actorId: userId, subjectUserId: folder.owner_id, itemType: "folder", itemId: folderId, action: "download" });
-
-  return { archive, folderName: folder.name };
+  return archive;
 }

@@ -4,6 +4,10 @@ import { hashPassword, verifyPassword } from "../../lib/password.js";
 import { checkPermission, resolveEffectiveRole, type ItemType, type Role } from "./permission-check.js";
 import { insufficientPermission, shareLinkNotFound, invalidSharePassword, tooManyPasswordAttempts } from "./errors.js";
 import { logActivity } from "../admin/audit-service.js";
+import * as storage from "../storage/client.js";
+import { isPreviewable } from "../filesystem/file-service.js";
+import { isThumbnailable } from "../thumbnails/thumbnail-service.js";
+import { buildFolderZipArchive } from "../filesystem/folder-service.js";
 
 const ROLE_RANK: Record<Role, number> = { viewer: 1, editor: 2, owner: 3 };
 const PASSWORD_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
@@ -134,4 +138,144 @@ export async function resolveShareLink(token: string, password?: string) {
   }
 
   return link;
+}
+
+type ResolvedShareLink = Awaited<ReturnType<typeof resolveShareLink>>;
+
+/**
+ * A public share link's own validity (resolveShareLink above) IS the authorization for
+ * everything under it — there's no userId to run checkPermission against. This is the equivalent
+ * scope check: is `itemId` the shared item itself, or (for a folder link) something structurally
+ * inside that folder's subtree. Same materialized_path containment check moveOrRenameFolder's
+ * cycle detection uses, just checking "is a descendant of" instead of "is an ancestor of".
+ */
+async function isWithinSharedScope(link: ResolvedShareLink, itemType: ItemType, itemId: string): Promise<boolean> {
+  if (link.item_type === "file") {
+    return itemType === "file" && itemId === link.item_id;
+  }
+
+  if (itemType === "folder") {
+    if (itemId === link.item_id) return true;
+    const folder = await db.folders.findFirst({ where: { id: itemId, deleted_at: null }, select: { materialized_path: true } });
+    return !!folder && folder.materialized_path.includes(`/${link.item_id}/`);
+  }
+
+  const file = await db.files.findFirst({ where: { id: itemId, deleted_at: null }, select: { folder_id: true } });
+  if (!file || !file.folder_id) return false;
+  if (file.folder_id === link.item_id) return true;
+  const folder = await db.folders.findFirst({ where: { id: file.folder_id, deleted_at: null }, select: { materialized_path: true } });
+  return !!folder && folder.materialized_path.includes(`/${link.item_id}/`);
+}
+
+/**
+ * Browsable listing for a public share link, à la getFolderContents but scoped to the shared
+ * subtree instead of a session's own access — `folderId` lets the visitor navigate into
+ * subfolders of a folder-type link (omitted, it defaults to the link's own root item).
+ * `isRoot`/`parentFolderId` let the frontend know when to stop offering an "up" link — a visitor
+ * can browse down into the shared subtree but never up past its root.
+ */
+export async function getPublicFolderContents(token: string, password: string | undefined, folderId?: string) {
+  const link = await resolveShareLink(token, password);
+
+  if (link.item_type === "file") {
+    const file = await db.files.findFirst({ where: { id: link.item_id, deleted_at: null } });
+    if (!file) throw shareLinkNotFound();
+    return {
+      name: file.name,
+      role: link.role,
+      folderId: null,
+      parentFolderId: null,
+      isRoot: true,
+      items: [] as ReturnType<typeof serializePublicItems>,
+    };
+  }
+
+  const targetFolderId = folderId ?? link.item_id;
+  if (targetFolderId !== link.item_id && !(await isWithinSharedScope(link, "folder", targetFolderId))) {
+    throw shareLinkNotFound();
+  }
+
+  const folder = await db.folders.findFirst({ where: { id: targetFolderId, deleted_at: null } });
+  if (!folder) throw shareLinkNotFound();
+
+  const [subFolders, files] = await Promise.all([
+    db.folders.findMany({ where: { parent_folder_id: folder.id, deleted_at: null }, orderBy: { name: "asc" } }),
+    db.files.findMany({ where: { folder_id: folder.id, deleted_at: null }, orderBy: { name: "asc" } }),
+  ]);
+
+  return {
+    name: folder.name,
+    role: link.role,
+    folderId: folder.id,
+    parentFolderId: folder.id === link.item_id ? null : folder.parent_folder_id,
+    isRoot: folder.id === link.item_id,
+    items: serializePublicItems(subFolders, files),
+  };
+}
+
+function serializePublicItems(
+  folders: { id: string; name: string; updated_at: Date }[],
+  files: { id: string; name: string; size_bytes: bigint; mime_type: string; updated_at: Date }[],
+) {
+  return [
+    ...folders.map((f) => ({ id: f.id, name: f.name, type: "folder" as const, updatedAt: f.updated_at.toISOString() })),
+    ...files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      type: "file" as const,
+      sizeBytes: f.size_bytes.toString(),
+      mimeType: f.mime_type,
+      updatedAt: f.updated_at.toISOString(),
+    })),
+  ];
+}
+
+export async function getPublicDownloadUrl(token: string, password: string | undefined, fileId: string): Promise<string> {
+  const link = await resolveShareLink(token, password);
+  if (!(await isWithinSharedScope(link, "file", fileId))) throw shareLinkNotFound();
+
+  const file = await db.files.findFirst({ where: { id: fileId, deleted_at: null } });
+  if (!file || file.upload_status !== "complete") throw shareLinkNotFound();
+
+  return storage.getPresignedDownloadUrl(file.storage_key, 300, file.name);
+}
+
+export async function getPublicPreviewUrl(
+  token: string,
+  password: string | undefined,
+  fileId: string,
+): Promise<{ url: string; mimeType: string } | null> {
+  const link = await resolveShareLink(token, password);
+  if (!(await isWithinSharedScope(link, "file", fileId))) throw shareLinkNotFound();
+
+  const file = await db.files.findFirst({ where: { id: fileId, deleted_at: null } });
+  if (!file || file.upload_status !== "complete") throw shareLinkNotFound();
+  if (!isPreviewable(file.mime_type)) return null;
+
+  const url = await storage.getPresignedPreviewUrl(file.storage_key, file.mime_type);
+  return { url, mimeType: file.mime_type };
+}
+
+export async function getPublicThumbnailUrl(
+  token: string,
+  password: string | undefined,
+  fileId: string,
+): Promise<string | null> {
+  const link = await resolveShareLink(token, password);
+  if (!(await isWithinSharedScope(link, "file", fileId))) throw shareLinkNotFound();
+
+  const file = await db.files.findFirst({ where: { id: fileId, deleted_at: null } });
+  if (!file) throw shareLinkNotFound();
+  if (!isThumbnailable(file.mime_type) || file.thumbnail_status !== "ready" || !file.thumbnail_key) return null;
+  return storage.getPresignedDownloadUrl(file.thumbnail_key);
+}
+
+export async function getPublicFolderZipArchive(token: string, password: string | undefined, folderId: string) {
+  const link = await resolveShareLink(token, password);
+  if (!(await isWithinSharedScope(link, "folder", folderId))) throw shareLinkNotFound();
+
+  const folder = await db.folders.findFirst({ where: { id: folderId, deleted_at: null } });
+  if (!folder) throw shareLinkNotFound();
+
+  return { archive: buildFolderZipArchive(folderId), folderName: folder.name };
 }

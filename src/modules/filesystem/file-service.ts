@@ -100,7 +100,7 @@ export async function getDownloadUrl(userId: string, fileId: string) {
 
 const PREVIEWABLE_PREFIXES = ["image/", "video/", "audio/"];
 
-function isPreviewable(mimeType: string): boolean {
+export function isPreviewable(mimeType: string): boolean {
   return PREVIEWABLE_PREFIXES.some((prefix) => mimeType.startsWith(prefix)) || mimeType === "application/pdf";
 }
 
