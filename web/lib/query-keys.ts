@@ -16,7 +16,7 @@ export const queryKeys = {
   trash: () => ["trash"] as const,
 
   adminUsers: () => ["admin", "users"] as const,
-  adminUserFiles: (userId: string) => ["admin", "users", userId, "files"] as const,
+  adminUserFiles: (userId: string, folderId?: string) => ["admin", "users", userId, "files", folderId ?? null] as const,
   adminStats: () => ["admin", "stats"] as const,
   adminSystemStorage: () => ["admin", "system-storage"] as const,
   adminActivity: () => ["admin", "activity"] as const,

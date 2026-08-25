@@ -180,7 +180,7 @@ function DeleteAccountSection() {
       <h2 className="font-medium text-destructive">Delete account</h2>
       <p className="text-sm text-muted-foreground">
         This cannot be undone. Your owned files and folders will be reassigned to the system
-        admin account (REQUIREMENTS.md §5.1.1).
+        admin account.
       </p>
       {error && <p className="text-sm text-destructive">{error}</p>}
       <label htmlFor="confirm" className="block text-sm font-medium">

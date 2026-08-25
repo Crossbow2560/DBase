@@ -179,11 +179,21 @@ export async function adminGetUserFiles(adminId: string, targetUserId: string, f
   await logAdminViewIfNewSession(adminId, targetUserId);
 
   if (folderId) {
+    // Not owner_id-scoped, same as folder-service.ts's getFolderContents — a shared/nested
+    // folder can hold items owned by someone other than targetUserId, and this is still "this
+    // user's files" from the browsing admin's point of view since they got here by drilling into
+    // targetUserId's own tree.
+    const folder = await db.folders.findFirst({ where: { id: folderId, deleted_at: null } });
+    if (!folder) throw userNotFound();
+
     const [folders, files] = await Promise.all([
       db.folders.findMany({ where: { parent_folder_id: folderId, deleted_at: null }, orderBy: { name: "asc" } }),
       db.files.findMany({ where: { folder_id: folderId, deleted_at: null }, orderBy: { name: "asc" } }),
     ]);
-    return serializeAdminItems(folders, files);
+    return {
+      folder: { id: folder.id, name: folder.name, parentFolderId: folder.parent_folder_id },
+      items: serializeAdminItems(folders, files),
+    };
   }
 
   const [folders, files] = await Promise.all([
@@ -196,15 +206,22 @@ export async function adminGetUserFiles(adminId: string, targetUserId: string, f
       orderBy: { name: "asc" },
     }),
   ]);
-  return serializeAdminItems(folders, files);
+  return { folder: null, items: serializeAdminItems(folders, files) };
 }
 
 function serializeAdminItems(
-  folders: { id: string; name: string }[],
-  files: { id: string; name: string }[],
+  folders: { id: string; name: string; updated_at: Date }[],
+  files: { id: string; name: string; size_bytes: bigint; mime_type: string; updated_at: Date }[],
 ) {
   return [
-    ...folders.map((f) => ({ id: f.id, name: f.name, type: "folder" as const })),
-    ...files.map((f) => ({ id: f.id, name: f.name, type: "file" as const })),
+    ...folders.map((f) => ({ id: f.id, name: f.name, type: "folder" as const, updatedAt: f.updated_at.toISOString() })),
+    ...files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      type: "file" as const,
+      sizeBytes: f.size_bytes.toString(),
+      mimeType: f.mime_type,
+      updatedAt: f.updated_at.toISOString(),
+    })),
   ];
 }

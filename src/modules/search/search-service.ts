@@ -4,6 +4,9 @@ interface SearchResultRow {
   id: string;
   name: string;
   type: "file" | "folder";
+  size_bytes: bigint | null;
+  mime_type: string | null;
+  updated_at: Date;
 }
 
 /**
@@ -24,7 +27,7 @@ export async function search(userId: string, term: string) {
   if (trimmed.length === 0) return [];
 
   const rows = await db.$queryRaw<SearchResultRow[]>`
-    SELECT id, name, 'file'::text as type FROM files
+    SELECT id, name, 'file'::text as type, size_bytes, mime_type, updated_at FROM files
     WHERE deleted_at IS NULL
       AND name ILIKE '%' || ${trimmed} || '%'
       AND (
@@ -32,7 +35,7 @@ export async function search(userId: string, term: string) {
         OR id IN (SELECT item_id FROM permissions WHERE item_type = 'file' AND user_id = ${userId}::uuid)
       )
     UNION ALL
-    SELECT id, name, 'folder'::text as type FROM folders
+    SELECT id, name, 'folder'::text as type, NULL::bigint as size_bytes, NULL::text as mime_type, updated_at FROM folders
     WHERE deleted_at IS NULL
       AND name ILIKE '%' || ${trimmed} || '%'
       AND (
@@ -43,5 +46,12 @@ export async function search(userId: string, term: string) {
     LIMIT 50
   `;
 
-  return rows;
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    sizeBytes: row.size_bytes !== null ? row.size_bytes.toString() : undefined,
+    mimeType: row.mime_type ?? undefined,
+    updatedAt: row.updated_at.toISOString(),
+  }));
 }

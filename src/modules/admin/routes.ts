@@ -103,8 +103,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get("/api/v1/admin/users/:id/files", { preHandler: requireAdmin }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const { folderId } = request.query as { folderId?: string };
-    const items = await admin.adminGetUserFiles(request.session!.user_id, id, folderId);
-    reply.send({ items });
+    const result = await admin.adminGetUserFiles(request.session!.user_id, id, folderId);
+    reply.send(result);
   });
 
   app.get("/api/v1/admin/stats", { preHandler: requireAdmin }, async (_request, reply) => {
