@@ -49,14 +49,21 @@ export async function removeFavorite(userId: string, itemType: ItemType, itemId:
 export async function listFavorites(userId: string) {
   const rows = await db.favorites.findMany({ where: { user_id: userId }, orderBy: { created_at: "desc" } });
 
-  const result: { id: string; name: string; type: ItemType }[] = [];
+  const result: {
+    id: string;
+    name: string;
+    type: ItemType;
+    sizeBytes?: string;
+    mimeType?: string;
+    updatedAt: string;
+  }[] = [];
   for (const row of rows) {
-    const name = await resolveVisibleName(userId, row.item_type, row.item_id);
-    if (name === null) {
+    const details = await resolveVisibleItem(userId, row.item_type, row.item_id);
+    if (details === null) {
       await db.favorites.deleteMany({ where: { user_id: userId, item_type: row.item_type, item_id: row.item_id } });
       continue;
     }
-    result.push({ id: row.item_id, name, type: row.item_type });
+    result.push({ id: row.item_id, type: row.item_type, ...details });
   }
   return result;
 }
@@ -68,12 +75,35 @@ async function isLive(itemType: ItemType, itemId: string): Promise<boolean> {
   return (await db.folders.findFirst({ where: { id: itemId, deleted_at: null } })) !== null;
 }
 
-async function resolveVisibleName(userId: string, itemType: ItemType, itemId: string): Promise<string | null> {
+/**
+ * Same fields folder-service.ts's serializeItems() returns for a folder listing — the frontend
+ * renders favorited files/folders through the same list/grid components as a folder's contents
+ * (Size/Modified columns, grid thumbnails), so this needs to carry the same shape rather than
+ * just a name.
+ */
+export async function resolveVisibleItem(
+  userId: string,
+  itemType: ItemType,
+  itemId: string,
+): Promise<{ name: string; sizeBytes?: string; mimeType?: string; updatedAt: string } | null> {
   if (!(await checkPermission(userId, itemType, itemId, "viewer"))) return null;
   if (itemType === "file") {
-    const file = await db.files.findFirst({ where: { id: itemId, deleted_at: null }, select: { name: true } });
-    return file?.name ?? null;
+    const file = await db.files.findFirst({
+      where: { id: itemId, deleted_at: null },
+      select: { name: true, size_bytes: true, mime_type: true, updated_at: true },
+    });
+    if (!file) return null;
+    return {
+      name: file.name,
+      sizeBytes: file.size_bytes.toString(),
+      mimeType: file.mime_type,
+      updatedAt: file.updated_at.toISOString(),
+    };
   }
-  const folder = await db.folders.findFirst({ where: { id: itemId, deleted_at: null }, select: { name: true } });
-  return folder?.name ?? null;
+  const folder = await db.folders.findFirst({
+    where: { id: itemId, deleted_at: null },
+    select: { name: true, updated_at: true },
+  });
+  if (!folder) return null;
+  return { name: folder.name, updatedAt: folder.updated_at.toISOString() };
 }

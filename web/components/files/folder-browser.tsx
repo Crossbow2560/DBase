@@ -16,7 +16,6 @@ import {
   Folder,
   FileText,
   Star,
-  MoreHorizontal,
   Pencil,
   FolderInput,
   Tags,
@@ -32,6 +31,8 @@ import { api, ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query-keys";
 import { useUploads } from "@/lib/uploads";
+import { formatBytes, formatDate } from "@/lib/format";
+import { useViewPreference } from "@/lib/use-view-preference";
 import { Button } from "@/components/ui/button";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { ShareModal } from "@/components/files/share-modal";
@@ -39,6 +40,9 @@ import { RenameModal } from "@/components/files/rename-modal";
 import { MoveModal, type MoveTarget } from "@/components/files/move-modal";
 import { TagsModal } from "@/components/files/tags-modal";
 import { NewFolderModal } from "@/components/files/new-folder-modal";
+import { RowActionsMenu, type RowAction } from "@/components/files/row-actions-menu";
+import { FileThumbnail } from "@/components/files/file-thumbnail";
+import { SharingBadge } from "@/components/files/sharing-badge";
 
 interface FolderContentsItem {
   id: string;
@@ -48,172 +52,10 @@ interface FolderContentsItem {
   updatedAt: string;
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
-
 interface CurrentFolder {
   id: string;
   name: string;
   parentFolderId: string | null;
-}
-
-/**
- * Enlarged thumbnail for grid view only — list view always shows the plain file icon (below),
- * never a thumbnail, so scanning a long list stays fast and visually uniform.
- * REQUIREMENTS.md §5.9: "no preview available" is a normal state, not an error — this just falls
- * back to the plain file icon whenever the endpoint reports unavailable (not thumbnailable,
- * still generating, or failed), same as while loading.
- */
-function FileThumbnail({ fileId }: { fileId: string }) {
-  const { data } = useQuery({
-    queryKey: queryKeys.thumbnail(fileId),
-    queryFn: () => api.get<{ available: boolean; url?: string }>(`/files/${fileId}/thumbnail`),
-    staleTime: 60_000,
-  });
-
-  if (data?.available && data.url) {
-    return <img src={data.url} alt="" className="h-full w-full object-cover" />;
-  }
-  return <FileText className="h-8 w-8 text-muted-foreground" aria-hidden />;
-}
-
-/**
- * Was a hardcoded "Private" string for every row regardless of actual state — reported directly
- * ("after sharing file tag does not change"). Same per-row-query tradeoff as FileThumbnail above:
- * two small queries per row rather than a bulk endpoint, since none exists for "sharing summary
- * across many items" and this list is typically small enough for it not to matter.
- */
-function SharingBadge({ itemType, itemId }: { itemType: "file" | "folder"; itemId: string }) {
-  const { data: collaborators } = useQuery({
-    queryKey: ["items", itemType, itemId, "permissions"],
-    queryFn: () => api.get<{ collaborators: unknown[] }>(`/items/${itemType}/${itemId}/permissions`),
-    staleTime: 30_000,
-  });
-  const { data: links } = useQuery({
-    queryKey: ["items", itemType, itemId, "share-links"],
-    queryFn: () => api.get<{ links: unknown[] }>(`/items/${itemType}/${itemId}/share-links`),
-    staleTime: 30_000,
-  });
-
-  const isShared = (collaborators?.collaborators.length ?? 0) > 0 || (links?.links.length ?? 0) > 0;
-  return <>{isShared ? "Shared" : "Private"}</>;
-}
-
-interface RowAction {
-  label: string;
-  icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
-  onSelect: () => void;
-  destructive?: boolean;
-}
-
-// Deliberately hand-rolled rather than a Radix DropdownMenu: this codebase has no other Radix
-// Portal usage, and @radix-ui/react-dropdown-menu's trigger reliably failed to open here (traced
-// to something in this app's event handling, not narrowed further) — a plain click-outside popover
-// sidesteps it entirely with the same look.
-//
-// The popup itself is `position: fixed`, placed from the trigger button's own getBoundingClientRect
-// rather than CSS `absolute` inside a `relative` wrapper. Every place this renders (the list
-// table, the grid cards) sits inside a `rounded-lg overflow-hidden` container for its own visual
-// corners, and a CSS-absolute popup is clipped by that ancestor the moment it would extend past
-// its bounds — which is exactly the near-bottom rows (the ones you'd actually scroll to and use).
-// `fixed` positioning is computed relative to the viewport, not any scrolling/clipping ancestor,
-// so it escapes that entirely. It also flips to open upward when there isn't room below, for the
-// same reason.
-const MENU_EST_HEIGHT_PER_ACTION = 34;
-
-function RowActionsMenu({ actions }: { actions: RowAction[] }) {
-  const [open, setOpen] = React.useState(false);
-  const [position, setPosition] = React.useState<{ top: number; left: number } | null>(null);
-  const containerRef = React.useRef<HTMLDivElement>(null);
-  const triggerRef = React.useRef<HTMLButtonElement>(null);
-
-  React.useEffect(() => {
-    if (!open) return;
-    function onPointerDown(e: MouseEvent) {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(e.target as Node) &&
-        !(e.target as HTMLElement).closest('[data-row-actions-menu="true"]')
-      ) {
-        setOpen(false);
-      }
-    }
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
-  function openMenu() {
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const menuHeight = actions.length * MENU_EST_HEIGHT_PER_ACTION + 8;
-    const opensUpward = rect.bottom + menuHeight > window.innerHeight;
-    setPosition({
-      top: opensUpward ? rect.top - menuHeight : rect.bottom + 4,
-      left: Math.max(8, rect.right - 144), // 144px = menu min-width, right-aligned to the trigger
-    });
-    setOpen(true);
-  }
-
-  return (
-    <div ref={containerRef} className="relative inline-block text-left">
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => (open ? setOpen(false) : openMenu())}
-        className={cn(
-          "rounded-md p-1.5 text-muted-foreground opacity-100 transition-opacity hover:bg-muted hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100",
-          open && "opacity-100 bg-muted",
-        )}
-        aria-label="More actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <MoreHorizontal className="h-4 w-4" aria-hidden />
-      </button>
-      {open && position && (
-        <div
-          role="menu"
-          data-row-actions-menu="true"
-          style={{ position: "fixed", top: position.top, left: position.left }}
-          className="z-50 min-w-[9rem] overflow-hidden rounded-md border border-border bg-background p-1 text-foreground shadow-lg"
-        >
-          {actions.map((action) => (
-            <button
-              key={action.label}
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                action.onSelect();
-              }}
-              className={cn(
-                "flex w-full cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm outline-none hover:bg-muted focus:bg-muted",
-                action.destructive && "text-destructive",
-              )}
-            >
-              <action.icon className="h-4 w-4" aria-hidden />
-              {action.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 export function FolderBrowser({ folderId }: { folderId: string | null }) {
@@ -227,12 +69,64 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   const [moveTargets, setMoveTargets] = React.useState<{ items: MoveTarget[]; label: string } | null>(null);
   const [tagsItem, setTagsItem] = React.useState<FolderContentsItem | null>(null);
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
-  const [view, setView] = React.useState<"list" | "grid">("list");
+  const [view, setView] = useViewPreference();
   const [isDraggingOver, setIsDraggingOver] = React.useState(false);
   // dragenter/dragleave fire on every child element as the pointer crosses them, not just once
   // for the container — a plain boolean flips off mid-drag every time it passes over a row/table
   // cell. Counting enter/leave pairs and only clearing at zero is the standard fix.
   const dragCounterRef = React.useRef(0);
+
+  // Internal item drag-to-move — dragging a row/card and dropping it onto a folder row/card
+  // moves it there. Distinct from the onDragEnter/onDragOver/onDrop trio above, which is for
+  // dragging files in from the OS to upload: those gate on
+  // `e.dataTransfer.types.includes("Files")`, which a same-page HTML5 drag never sets (there's
+  // no OS File object involved), so the two don't interfere with each other.
+  const [draggedItem, setDraggedItem] = React.useState<FolderContentsItem | null>(null);
+  const [dragOverFolderId, setDragOverFolderId] = React.useState<string | null>(null);
+
+  async function moveItemInto(item: FolderContentsItem, targetFolderId: string) {
+    if (item.id === targetFolderId) return;
+    await api.patch(
+      item.type === "folder" ? `/folders/${item.id}` : `/files/${item.id}`,
+      item.type === "folder" ? { parentFolderId: targetFolderId } : { folderId: targetFolderId },
+    );
+    queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
+  }
+
+  function onItemDragStart(e: React.DragEvent, item: FolderContentsItem) {
+    e.dataTransfer.effectAllowed = "move";
+    // Required for some browsers (notably Firefox) to allow the drag to start at all — the
+    // actual move doesn't read this back, it uses the draggedItem state closed over below, since
+    // this is always a same-page drag.
+    e.dataTransfer.setData("text/plain", item.id);
+    setDraggedItem(item);
+  }
+
+  function onItemDragEnd() {
+    setDraggedItem(null);
+    setDragOverFolderId(null);
+  }
+
+  function onFolderDragOver(e: React.DragEvent, target: FolderContentsItem) {
+    if (target.type !== "folder" || !draggedItem || draggedItem.id === target.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDragOverFolderId(target.id);
+  }
+
+  function onFolderDragLeave(target: FolderContentsItem) {
+    setDragOverFolderId((prev) => (prev === target.id ? null : prev));
+  }
+
+  async function onFolderDrop(e: React.DragEvent, target: FolderContentsItem) {
+    if (target.type !== "folder" || !draggedItem || draggedItem.id === target.id) return;
+    e.preventDefault();
+    e.stopPropagation(); // don't let the OS-file-upload dropzone on the outer container also fire
+    setDragOverFolderId(null);
+    const item = draggedItem;
+    setDraggedItem(null);
+    await moveItemInto(item, target.id);
+  }
 
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.folderContents(folderId),
@@ -546,7 +440,20 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
               {data.items.map((item) => {
                 const isSelected = selectedIds.has(item.id);
                 return (
-                  <tr key={item.id} className={cn("group hover:bg-muted/30", isSelected && "bg-accent/10")}>
+                  <tr
+                    key={item.id}
+                    draggable
+                    onDragStart={(e) => onItemDragStart(e, item)}
+                    onDragEnd={onItemDragEnd}
+                    onDragOver={(e) => onFolderDragOver(e, item)}
+                    onDragLeave={() => onFolderDragLeave(item)}
+                    onDrop={(e) => onFolderDrop(e, item)}
+                    className={cn(
+                      "group hover:bg-muted/30",
+                      isSelected && "bg-accent/10",
+                      dragOverFolderId === item.id && "bg-accent/20 ring-2 ring-inset ring-accent",
+                    )}
+                  >
                     <td className="px-4 py-2.5 align-middle">
                       <input
                         type="checkbox"
@@ -616,9 +523,16 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
             return (
             <div
               key={item.id}
+              draggable
+              onDragStart={(e) => onItemDragStart(e, item)}
+              onDragEnd={onItemDragEnd}
+              onDragOver={(e) => onFolderDragOver(e, item)}
+              onDragLeave={() => onFolderDragLeave(item)}
+              onDrop={(e) => onFolderDrop(e, item)}
               className={cn(
                 "group relative flex flex-col rounded-lg border border-border hover:bg-muted/30",
                 isSelected && "border-accent bg-accent/10",
+                dragOverFolderId === item.id && "border-accent bg-accent/20 ring-2 ring-inset ring-accent",
               )}
             >
               <input

@@ -77,10 +77,31 @@ export async function organizeRoutes(app: FastifyInstance) {
     },
   );
 
+  app.patch(
+    "/api/v1/tags/:id",
+    {
+      preHandler: requireSession,
+      ...writeHeavyRateLimit,
+      schema: { body: { type: "object", properties: { color: { type: ["string", "null"] } } } },
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const { color } = request.body as { color?: string | null };
+      await tags.updateTagColor(request.session!.user_id, id, color ?? null);
+      reply.code(204).send();
+    },
+  );
+
   app.delete("/api/v1/tags/:id", { preHandler: requireSession, ...writeHeavyRateLimit }, async (request, reply) => {
     const { id } = request.params as { id: string };
     await tags.deleteTag(request.session!.user_id, id);
     reply.code(204).send();
+  });
+
+  app.get("/api/v1/tags/:id/items", { preHandler: requireSession }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const items = await tags.listItemsByTag(request.session!.user_id, id);
+    reply.send({ items });
   });
 
   app.get("/api/v1/items/:type/:id/tags", { preHandler: requireSession }, async (request, reply) => {

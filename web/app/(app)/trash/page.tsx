@@ -85,9 +85,12 @@ export default function TrashPage() {
     }
   }
 
+  const [confirmingEmpty, setConfirmingEmpty] = React.useState(false);
+  const [emptyTrashError, setEmptyTrashError] = React.useState<string | null>(null);
+
   async function emptyTrash() {
     if (!data || data.items.length === 0) return;
-    if (!confirm(`Permanently delete all ${data.items.length} item(s) in trash? This cannot be undone.`)) return;
+    setEmptyTrashError(null);
     setEmptyingTrash(true);
     const results = await Promise.allSettled(
       data.items.map((item) => api.delete(`/trash/${item.type}/${item.id}`)),
@@ -99,10 +102,11 @@ export default function TrashPage() {
       return next;
     });
     const failedCount = results.filter((r) => r.status === "rejected").length;
-    if (failedCount > 0) {
-      alert(`${failedCount} item(s) could not be deleted. They're still in trash — try again.`);
-    }
     setEmptyingTrash(false);
+    setConfirmingEmpty(false);
+    if (failedCount > 0) {
+      setEmptyTrashError(`${failedCount} item(s) could not be deleted. They're still in trash — try again.`);
+    }
   }
 
   return (
@@ -115,16 +119,18 @@ export default function TrashPage() {
           </p>
         </div>
         {visibleItems.length > 0 && (
-          <Button variant="destructive" size="sm" onClick={emptyTrash} disabled={emptyingTrash}>
-            {emptyingTrash ? (
-              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
-            ) : (
-              <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
-            )}
+          <Button variant="destructive" size="sm" onClick={() => setConfirmingEmpty(true)}>
+            <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
             Empty trash
           </Button>
         )}
       </div>
+
+      {emptyTrashError && (
+        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {emptyTrashError}
+        </p>
+      )}
 
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
       {data && visibleItems.length === 0 && <p className="text-sm text-muted-foreground">Trash is empty.</p>}
@@ -182,6 +188,42 @@ export default function TrashPage() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {confirmingEmpty && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => !emptyingTrash && setConfirmingEmpty(false)}
+        >
+          <div
+            className="w-full max-w-sm space-y-3 rounded-md bg-background p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-semibold">Empty trash</h2>
+            <p className="text-sm text-muted-foreground">
+              Permanently delete all {visibleItems.length} item{visibleItems.length === 1 ? "" : "s"} in trash?
+              This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setConfirmingEmpty(false)}
+                disabled={emptyingTrash}
+              >
+                Cancel
+              </Button>
+              <Button type="button" variant="destructive" onClick={emptyTrash} disabled={emptyingTrash}>
+                {emptyingTrash ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                )}
+                Empty trash
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

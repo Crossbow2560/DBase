@@ -13,7 +13,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Upload, Folder, Share2, Tag, Star, Trash2, Gauge, Users, ArrowRight, LayoutGrid } from "lucide-react";
+import { Upload, Folder, FileText, Share2, Tag, Star, Trash2, Gauge, Users, ArrowRight, LayoutGrid } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 
@@ -92,7 +92,7 @@ export default function RootPage() {
                 <span className="ml-2 text-xs text-muted-foreground">My Files</span>
               </div>
               <div className="grid grid-cols-4 gap-2.5 p-4 sm:grid-cols-6">
-                {[Folder, Folder, Upload, Share2, Tag, Star].map((Icon, i) => (
+                {[Folder, FileText, Upload, Share2, Tag, Star].map((Icon, i) => (
                   <div
                     key={i}
                     className="flex aspect-square items-center justify-center rounded-lg border border-border bg-background/60"

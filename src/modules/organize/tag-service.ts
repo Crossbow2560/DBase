@@ -4,6 +4,7 @@ import { AppError } from "../accounts/errors.js";
 import { checkPermission } from "../access/permission-check.js";
 import type { ItemType } from "../access/permission-check.js";
 import { logActivity } from "../admin/audit-service.js";
+import { resolveVisibleItem } from "./favorite-service.js";
 import { itemNotFound, tagNotFound, tagNameCollision } from "./errors.js";
 
 const POSTGRES_UNIQUE_VIOLATION = "P2002";
@@ -37,6 +38,12 @@ export async function listTags(userId: string) {
 /** DESIGN.md §3.12: cascade-deletes the tag's ITEM_TAGS rows via the DB's own ON DELETE CASCADE. */
 export async function deleteTag(userId: string, tagId: string): Promise<void> {
   const result = await db.tags.deleteMany({ where: { id: tagId, owner_id: userId } });
+  if (result.count === 0) throw tagNotFound();
+}
+
+/** Color-only edit for now (the color picker) — renaming an existing tag isn't exposed in the UI yet. */
+export async function updateTagColor(userId: string, tagId: string, color: string | null): Promise<void> {
+  const result = await db.tags.updateMany({ where: { id: tagId, owner_id: userId }, data: { color } });
   if (result.count === 0) throw tagNotFound();
 }
 
@@ -83,4 +90,36 @@ export async function listItemTags(userId: string, itemType: ItemType, itemId: s
     include: { tag: true },
   });
   return rows.map((row) => row.tag);
+}
+
+/**
+ * The reverse of listItemTags: every item (still live, still visible to this user) carrying a
+ * given tag — the tags page needs this to actually browse "what's under this tag" rather than
+ * just managing the tag definitions themselves. Reuses favorite-service.ts's
+ * resolveVisibleItem() for the same reason listFavorites() does: this needs the same
+ * name/size/mimeType/updatedAt shape the file-browser row components already render, not just a
+ * name. An item that no longer resolves (deleted, or access since revoked) is silently skipped
+ * rather than pruning the ITEM_TAGS row the way listFavorites prunes stale favorites — unlike a
+ * favorite, a tag application isn't solely this user's own data to prune at will if the
+ * underlying access loss might be reversible (DESIGN.md §3.12 doesn't specify eager cleanup
+ * here the way REQUIREMENTS.md §5.7 does for favorites).
+ */
+export async function listItemsByTag(userId: string, tagId: string) {
+  const tag = await db.tags.findFirst({ where: { id: tagId, owner_id: userId } });
+  if (!tag) throw tagNotFound();
+
+  const rows = await db.item_tags.findMany({ where: { tag_id: tagId } });
+  const result: {
+    id: string;
+    name: string;
+    type: ItemType;
+    sizeBytes?: string;
+    mimeType?: string;
+    updatedAt: string;
+  }[] = [];
+  for (const row of rows) {
+    const details = await resolveVisibleItem(userId, row.item_type, row.item_id);
+    if (details) result.push({ id: row.item_id, type: row.item_type, ...details });
+  }
+  return result;
 }
