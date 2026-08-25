@@ -4,6 +4,7 @@ import { config } from "../../config.js";
 import { hashPassword, verifyPassword, isPasswordStrongEnough } from "../../lib/password.js";
 import { generateToken, hashToken } from "../../lib/tokens.js";
 import { sendEmail } from "../../lib/email.js";
+import { renderEmailLayout } from "../../lib/emailTemplate.js";
 import {
   registrationFailed,
   invalidCredentials,
@@ -34,10 +35,12 @@ async function sendVerificationEmail(user: { id: string; email: string; display_
   await sendEmail(
     user.email,
     "Verify your email address",
-    `<p>Hi ${user.display_name},</p>
-     <p>Confirm this is your email address to finish setting up your DBase account:</p>
-     <p><a href="${verifyUrl}">${verifyUrl}</a></p>
-     <p>This link expires in ${config.emailVerificationTtlHours} hours. If you didn't create this account, you can ignore this email.</p>`,
+    renderEmailLayout({
+      heading: `Hi ${user.display_name}, confirm your email`,
+      bodyHtml: `<p>Confirm this is your email address to finish setting up your DBase account. This link expires in ${config.emailVerificationTtlHours} hours.</p>`,
+      buttonLabel: "Verify email address",
+      buttonUrl: verifyUrl,
+    }),
   );
 }
 
@@ -254,10 +257,12 @@ export async function requestPasswordReset(email: string) {
   await sendEmail(
     email,
     "Reset your password",
-    `<p>Hi ${user.display_name},</p>
-     <p>Someone requested a password reset for this account. If that was you, choose a new password here:</p>
-     <p><a href="${resetUrl}">${resetUrl}</a></p>
-     <p>This link expires in ${config.passwordResetTtlMinutes} minutes. If you didn't request this, you can ignore this email.</p>`,
+    renderEmailLayout({
+      heading: `Hi ${user.display_name}, reset your password`,
+      bodyHtml: `<p>Someone requested a password reset for this account. If that was you, choose a new password using the button below. This link expires in ${config.passwordResetTtlMinutes} minutes.</p>`,
+      buttonLabel: "Reset password",
+      buttonUrl: resetUrl,
+    }),
   );
 }
 
