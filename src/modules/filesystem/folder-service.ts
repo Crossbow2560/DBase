@@ -73,9 +73,10 @@ export async function getFolderContents(userId: string, folderId: string | null)
         select: { id: true, name: true, size_bytes: true, mime_type: true, updated_at: true },
       }),
     ]);
+    const sizes = await getRecursiveFolderSizes(folders.map((f) => f.id));
     return {
       folder: { id: folder.id, name: folder.name, parentFolderId: folder.parent_folder_id },
-      items: serializeItems(folders, files),
+      items: serializeItems(folders, files, sizes),
     };
   }
 
@@ -94,18 +95,46 @@ export async function getFolderContents(userId: string, folderId: string | null)
       select: { id: true, name: true, size_bytes: true, mime_type: true, updated_at: true },
     }),
   ]);
-  return { folder: null, items: serializeItems(folders, files) };
+  const sizes = await getRecursiveFolderSizes(folders.map((f) => f.id));
+  return { folder: null, items: serializeItems(folders, files, sizes) };
+}
+
+/**
+ * A folder's own row carries no size — only its files (and descendants') do. Sums, per given
+ * folder id, every non-deleted file anywhere in that folder's subtree (itself included), via
+ * FOLDERS.materialized_path prefix matching: a folder's own materialized_path is exactly the
+ * prefix every descendant's path (and the folder's own direct files' containing-folder path)
+ * starts with — see createFolder above for how that path is built. One query for the whole
+ * batch of sibling folders being listed, not N+1 per row.
+ */
+async function getRecursiveFolderSizes(folderIds: string[]): Promise<Map<string, bigint>> {
+  if (folderIds.length === 0) return new Map();
+  const rows = await db.$queryRaw<{ folder_id: string; total: bigint }[]>`
+    SELECT child.id as folder_id, COALESCE(SUM(f.size_bytes), 0)::bigint as total
+    FROM folders child
+    LEFT JOIN folders descendant
+      ON descendant.materialized_path LIKE child.materialized_path || '%'
+      AND descendant.deleted_at IS NULL
+    LEFT JOIN files f
+      ON f.folder_id = descendant.id
+      AND f.deleted_at IS NULL
+    WHERE child.id = ANY(${folderIds}::uuid[])
+    GROUP BY child.id
+  `;
+  return new Map(rows.map((r) => [r.folder_id, r.total]));
 }
 
 function serializeItems(
   folders: { id: string; name: string; updated_at: Date }[],
   files: { id: string; name: string; size_bytes: bigint; mime_type: string; updated_at: Date }[],
+  folderSizes: Map<string, bigint>,
 ) {
   return [
     ...folders.map((f) => ({
       id: f.id,
       name: f.name,
       type: "folder" as const,
+      sizeBytes: (folderSizes.get(f.id) ?? 0n).toString(),
       updatedAt: f.updated_at.toISOString(),
     })),
     ...files.map((f) => ({

@@ -105,6 +105,11 @@ export async function accountRoutes(app: FastifyInstance) {
     reply.send(usage);
   });
 
+  app.get("/api/v1/users/me/storage-breakdown", { preHandler: requireSession }, async (request, reply) => {
+    const breakdown = await accounts.getStorageBreakdown(request.session!.user_id);
+    reply.send(breakdown);
+  });
+
   // Backs the share dialog's "share with" input — resolves an email to a userId.
   app.get(
     "/api/v1/users/lookup",

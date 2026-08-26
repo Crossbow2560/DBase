@@ -48,14 +48,19 @@ function QuotaIndicator() {
   const percent = quota > 0 ? Math.min(100, Math.round((used / quota) * 100)) : 0;
 
   return (
-    <div className="rounded-lg border border-border bg-muted/40 p-3">
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
-        <Cloud className="h-3.5 w-3.5" aria-hidden /> Storage Quota
+    <div className="rounded-lg border border-border bg-muted/40 p-[var(--sb-quota-pad)]">
+      <div
+        className="mb-[var(--sb-item-gap)] flex items-center gap-2 text-[length:var(--sb-item-text)] font-medium leading-none text-muted-foreground"
+      >
+        <Cloud className="h-[var(--sb-icon)] w-[var(--sb-icon)] shrink-0" aria-hidden /> Storage Quota
       </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+      <div className="w-full overflow-hidden rounded-full bg-muted" style={{ height: "var(--sb-bar-h)" }}>
         <div className="h-full bg-accent" style={{ width: `${percent}%` }} />
       </div>
-      <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
+      <div
+        className="flex items-center justify-between text-[length:var(--sb-item-text)] leading-none text-muted-foreground"
+        style={{ marginTop: "var(--sb-item-gap)" }}
+      >
         <span>{(used / 1e9).toFixed(1)} GB used</span>
         <span>{(quota / 1e9).toFixed(0)} GB</span>
       </div>
@@ -137,14 +142,17 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
         <aside
           className={cn(
-            "fixed inset-y-0 left-0 z-50 flex h-screen w-64 shrink-0 flex-col justify-between overflow-y-auto border-r border-border bg-background p-4 transition-transform duration-200 ease-in-out",
+            "fixed inset-y-0 left-0 z-50 flex h-screen w-64 shrink-0 flex-col overflow-y-hidden border-r border-border bg-background p-[var(--sb-pad)] transition-transform duration-200 ease-in-out",
             "md:sticky md:top-0 md:translate-x-0",
             mobileNavOpen ? "translate-x-0" : "-translate-x-full",
           )}
         >
-          <div>
-            <div className="mb-6 flex items-center gap-2.5 px-1">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-accent-foreground">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="mb-[var(--sb-logo-mb)] flex shrink-0 items-center gap-2.5 px-1">
+              <div
+                className="flex shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground"
+                style={{ height: "var(--sb-logo-icon)", width: "var(--sb-logo-icon)" }}
+              >
                 <LayoutGrid className="h-4 w-4" aria-hidden />
               </div>
               <div>
@@ -153,37 +161,53 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               </div>
             </div>
 
-            <nav className="flex flex-col gap-0.5">
+            {/* The three nav lists and the account block (below) are flex children of this
+                container with a capped gap between them, rather than each stacking with its own
+                fixed margin — a bounded middle ground between "always cramped" and the earlier
+                justify-evenly attempt, which handed ALL leftover vertical space to these gaps and
+                on a tall viewport ballooned them past 100px. Past --sb-group-gap's own cap, any
+                extra space just sits as empty room at the bottom, which is how most sidebars
+                behave anyway. */}
+            <div className="flex min-h-0 flex-1 flex-col" style={{ gap: "var(--sb-group-gap)" }}>
+            <nav className="flex flex-col" style={{ gap: "var(--sb-item-gap)" }}>
               {NAV_LINKS.map((link) => (
                 <Link
                   key={link.href}
                   href={link.href}
                   onClick={() => setMobileNavOpen(false)}
-                  className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-foreground/90 hover:bg-muted"
+                  className="flex items-center gap-2.5 rounded-md text-[length:var(--sb-item-text)] leading-none text-foreground/90 hover:bg-muted"
+                  style={{ paddingInline: "var(--sb-item-px)", paddingBlock: "var(--sb-item-py)" }}
                 >
-                  <link.icon className="h-4 w-4 shrink-0" aria-hidden />
+                  <link.icon className="h-[var(--sb-icon)] w-[var(--sb-icon)] shrink-0" aria-hidden />
                   {link.label}
                 </Link>
               ))}
             </nav>
 
-            <nav className="mt-4 flex flex-col gap-0.5 border-t border-border pt-4">
+            <nav
+              className="flex flex-col border-t border-border"
+              style={{ gap: "var(--sb-item-gap)", marginTop: "var(--sb-section-mt)", paddingTop: "var(--sb-section-pt)" }}
+            >
               {SECONDARY_LINKS.map((link) => (
                 <Link
                   key={link.href}
                   href={link.href}
                   onClick={() => setMobileNavOpen(false)}
-                  className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-foreground/90 hover:bg-muted"
+                  className="flex items-center gap-2.5 rounded-md text-[length:var(--sb-item-text)] leading-none text-foreground/90 hover:bg-muted"
+                  style={{ paddingInline: "var(--sb-item-px)", paddingBlock: "var(--sb-item-py)" }}
                 >
-                  <link.icon className="h-4 w-4 shrink-0" aria-hidden />
+                  <link.icon className="h-[var(--sb-icon)] w-[var(--sb-icon)] shrink-0" aria-hidden />
                   {link.label}
                 </Link>
               ))}
             </nav>
 
             {user.role === "admin" && (
-              <nav className="mt-4 flex flex-col gap-0.5 border-t border-border pt-4">
-                <div className="px-2.5 pb-1 text-xs font-semibold tracking-wide text-muted-foreground">
+              <nav
+                className="flex flex-col border-t border-border"
+                style={{ gap: "var(--sb-item-gap)", marginTop: "var(--sb-section-mt)", paddingTop: "var(--sb-section-pt)" }}
+              >
+                <div className="px-[var(--sb-item-px)] pb-[var(--sb-item-gap)] text-xs font-semibold leading-none tracking-wide text-muted-foreground">
                   ADMINISTRATION
                 </div>
                 {ADMIN_LINKS.map((link) => (
@@ -191,33 +215,51 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                     key={link.href}
                     href={link.href}
                     onClick={() => setMobileNavOpen(false)}
-                    className="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm text-foreground/90 hover:bg-muted"
+                    className="flex items-center gap-2.5 rounded-md text-[length:var(--sb-item-text)] leading-none text-foreground/90 hover:bg-muted"
+                    style={{ paddingInline: "var(--sb-item-px)", paddingBlock: "var(--sb-item-py)" }}
                   >
-                    <link.icon className="h-4 w-4 shrink-0" aria-hidden />
+                    <link.icon className="h-[var(--sb-icon)] w-[var(--sb-icon)] shrink-0" aria-hidden />
                     {link.label}
                   </Link>
                 ))}
               </nav>
             )}
-          </div>
 
-          <div className="space-y-3">
-            {/* REQUIREMENTS.md §5.6 / FRONTEND_DESIGN.md §4.2's shell-layout note. Backed by
-                GET /users/me/storage (APPLICATION_DESIGN.md §4.2) — a deliberately separate route
-                from /auth/me, see that endpoint's doc comment for why. */}
-            <QuotaIndicator />
-            <div className="flex items-center gap-2 border-t border-border pt-3 text-sm">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">
-                {user.displayName?.[0]?.toUpperCase() ?? "?"}
+            {/* Deliberately a peer of the three <nav> lists above within the same
+                justify-evenly container, not a separately-pinned block below it — an earlier
+                version kept this outside, and on a tall viewport the one gap in front of it
+                (from the outer flex layout just pushing it to the very bottom) ended up
+                visibly bigger than the gaps between nav sections, defeating the point of
+                spacing everything evenly. As a peer here, "the gap before this block" is one
+                of the same justify-evenly-computed gaps as all the others. */}
+            <div className="flex shrink-0 flex-col" style={{ gap: "var(--sb-block-gap)" }}>
+              <QuotaIndicator />
+              <div
+                className="flex items-center gap-2 border-t border-border text-sm"
+                style={{ paddingTop: "var(--sb-block-gap)" }}
+              >
+                <div
+                  className="flex shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium"
+                  style={{ height: "var(--sb-avatar)", width: "var(--sb-avatar)" }}
+                >
+                  {user.displayName?.[0]?.toUpperCase() ?? "?"}
+                </div>
+                <div className="min-w-0 flex-1 leading-none">
+                  <div className="truncate font-medium">{user.displayName}</div>
+                  <div className="mt-[var(--sb-item-gap)] truncate text-xs text-muted-foreground">{user.email}</div>
+                </div>
               </div>
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-medium">{user.displayName}</div>
-                <div className="truncate text-xs text-muted-foreground">{user.email}</div>
-              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleLogout}
+                className="w-full shrink-0"
+                style={{ height: "var(--sb-logout-h)" }}
+              >
+                Log out
+              </Button>
             </div>
-            <Button variant="outline" size="sm" onClick={handleLogout} className="w-full">
-              Log out
-            </Button>
+            </div>
           </div>
         </aside>
 

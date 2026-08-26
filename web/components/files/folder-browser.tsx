@@ -497,7 +497,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                       </div>
                     </td>
                     <td className="hidden px-4 py-2.5 align-middle text-muted-foreground sm:table-cell">
-                      {item.type === "file" && item.sizeBytes ? formatBytes(Number(item.sizeBytes)) : "—"}
+                      {item.sizeBytes !== undefined ? formatBytes(Number(item.sizeBytes)) : "—"}
                     </td>
                     <td className="hidden px-4 py-2.5 align-middle text-muted-foreground md:table-cell">
                       {formatDate(item.updatedAt)}

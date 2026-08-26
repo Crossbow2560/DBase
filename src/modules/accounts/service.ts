@@ -280,6 +280,43 @@ export async function getStorageUsage(userId: string) {
   };
 }
 
+type BreakdownRow = { category: "images" | "videos" | "documents"; bytes: bigint | null };
+
+/**
+ * Storage Capacity card's donut breakdown — every one of this user's own live files falls into
+ * exactly one of these three buckets (no separate "other" catch-all), so the segments always sum
+ * to the user's full storage_used_bytes. "Documents" is deliberately the catch-all for anything
+ * that isn't image/video, not just office formats — matches how the reference design's three
+ * categories read (a general one plus the two media-heavy ones users actually care to see split
+ * out), without needing a longer, harder-to-maintain mime-type allowlist.
+ */
+export async function getStorageBreakdown(userId: string) {
+  const rows = await db.$queryRaw<BreakdownRow[]>`
+    SELECT
+      CASE
+        WHEN mime_type LIKE 'image/%' THEN 'images'
+        WHEN mime_type LIKE 'video/%' THEN 'videos'
+        ELSE 'documents'
+      END AS category,
+      SUM(size_bytes) AS bytes
+    FROM files
+    WHERE owner_id = ${userId}::uuid AND deleted_at IS NULL AND upload_status = 'complete'
+    GROUP BY category
+  `;
+
+  const byCategory: Record<string, string> = { documents: "0", images: "0", videos: "0" };
+  for (const row of rows) {
+    byCategory[row.category] = (row.bytes ?? 0n).toString();
+  }
+  return {
+    categories: [
+      { category: "documents" as const, bytes: byCategory.documents },
+      { category: "images" as const, bytes: byCategory.images },
+      { category: "videos" as const, bytes: byCategory.videos },
+    ],
+  };
+}
+
 export async function requestPasswordReset(email: string) {
   const user = await db.users.findUnique({ where: { email } });
   // Non-enumerating: always behave identically regardless of whether the email exists.

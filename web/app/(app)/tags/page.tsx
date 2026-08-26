@@ -9,18 +9,18 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tag as TagIcon, Trash2, Plus, X, Folder, FileText, Star, Pencil, FolderInput, Tags as TagsIcon, Share2, Download } from "lucide-react";
-import { api, ApiError } from "@/lib/api-client";
+import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query-keys";
 import { formatBytes, formatDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ColorPicker } from "@/components/ui/color-picker";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { ShareModal } from "@/components/files/share-modal";
 import { RenameModal } from "@/components/files/rename-modal";
 import { MoveModal, type MoveTarget } from "@/components/files/move-modal";
 import { TagsModal } from "@/components/files/tags-modal";
+import { NewTagModal } from "@/components/files/new-tag-modal";
 import { RowActionsMenu, type RowAction } from "@/components/files/row-actions-menu";
 import { FileThumbnail } from "@/components/files/file-thumbnail";
 import { SharingBadge } from "@/components/files/sharing-badge";
@@ -41,9 +41,7 @@ interface TaggedItem {
 
 export default function TagsPage() {
   const queryClient = useQueryClient();
-  const [name, setName] = React.useState("");
-  const [newTagColor, setNewTagColor] = React.useState<string | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
+  const [creatingTag, setCreatingTag] = React.useState(false);
   const [selectedTagId, setSelectedTagId] = React.useState<string | null>(null);
   const [editingColorTagId, setEditingColorTagId] = React.useState<string | null>(null);
 
@@ -78,20 +76,6 @@ export default function TagsPage() {
 
   function invalidateItems() {
     queryClient.invalidateQueries({ queryKey: ["tags", selectedTagId, "items"] });
-  }
-
-  async function createTag(e: React.FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setError(null);
-    try {
-      await api.post("/tags", { name, color: newTagColor });
-      setName("");
-      setNewTagColor(null);
-      invalidateTags();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not create tag.");
-    }
   }
 
   async function deleteTag(tag: Tag) {
@@ -159,15 +143,10 @@ export default function TagsPage() {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[20rem_1fr]">
         <div className="space-y-4">
-          <form onSubmit={createTag} className="space-y-2 rounded-lg border border-border p-3">
-            <Input placeholder="New tag name" value={name} onChange={(e) => setName(e.target.value)} />
-            <ColorPicker value={newTagColor} onChange={setNewTagColor} />
-            <Button type="submit" size="sm" className="w-full">
-              <Plus className="mr-1 h-4 w-4" aria-hidden />
-              Create tag
-            </Button>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-          </form>
+          <Button size="sm" className="w-full" onClick={() => setCreatingTag(true)}>
+            <Plus className="mr-1 h-4 w-4" aria-hidden />
+            Create tag
+          </Button>
 
           {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
           {data && data.tags.length === 0 && <p className="text-sm text-muted-foreground">No tags yet.</p>}
@@ -365,6 +344,8 @@ export default function TagsPage() {
           onClose={() => setTagsItem(null)}
         />
       )}
+
+      {creatingTag && <NewTagModal onClose={() => setCreatingTag(false)} onCreated={invalidateTags} />}
     </div>
   );
 }

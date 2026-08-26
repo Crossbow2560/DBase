@@ -14,6 +14,74 @@ import { queryKeys } from "@/lib/query-keys";
 import { useUploads } from "@/lib/uploads";
 import { useAuth } from "@/lib/auth";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
+import { MultiRingChart } from "@/components/ui/multi-ring-chart";
+
+interface StorageUsage {
+  storageUsedBytes: string;
+  storageQuotaBytes: string;
+}
+
+interface StorageBreakdown {
+  categories: { category: "documents" | "images" | "videos"; bytes: string }[];
+}
+
+const CATEGORY_META = {
+  documents: { label: "Documents", textClass: "text-accent", bgClass: "bg-accent" },
+  images: { label: "Images", textClass: "text-violet-400", bgClass: "bg-violet-400" },
+  videos: { label: "Videos", textClass: "text-foreground", bgClass: "bg-foreground" },
+} as const;
+
+function StorageCapacityCard() {
+  const { data: usage } = useQuery({
+    queryKey: queryKeys.storageUsage(),
+    queryFn: () => api.get<StorageUsage>("/users/me/storage"),
+  });
+  const { data: breakdown } = useQuery({
+    queryKey: ["users", "me", "storage-breakdown"],
+    queryFn: () => api.get<StorageBreakdown>("/users/me/storage-breakdown"),
+  });
+
+  if (!usage || !breakdown) return null;
+
+  const used = Number(usage.storageUsedBytes);
+  const quota = Number(usage.storageQuotaBytes);
+  const percentUsed = quota > 0 ? Math.round((used / quota) * 100) : 0;
+
+  const segments = breakdown.categories.map((c) => ({
+    category: c.category,
+    bytes: Number(c.bytes),
+    percentOfQuota: quota > 0 ? (Number(c.bytes) / quota) * 100 : 0,
+  }));
+
+  return (
+    <div className="flex flex-wrap items-center gap-8 rounded-xl border border-border p-6">
+      <MultiRingChart
+        size={140}
+        strokeWidth={14}
+        centerLabel={`${percentUsed}%`}
+        centerSublabel="USED"
+        segments={segments.map((s) => ({
+          value: s.percentOfQuota,
+          colorClassName: CATEGORY_META[s.category].textClass,
+        }))}
+      />
+      <div className="min-w-[12rem] flex-1 space-y-3">
+        <h2 className="text-lg font-semibold">Storage Capacity</h2>
+        <ul className="space-y-2">
+          {segments.map((s) => (
+            <li key={s.category} className="flex items-center justify-between gap-4 text-sm">
+              <span className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-sm ${CATEGORY_META[s.category].bgClass}`} aria-hidden />
+                {CATEGORY_META[s.category].label}
+              </span>
+              <span className="text-muted-foreground">{(s.bytes / 1e9).toFixed(1)} GB</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
 
 interface HomeItem {
   id: string;
@@ -134,6 +202,8 @@ export default function HomePage() {
           {files.length === 1 ? "" : "s"} and {folders.length} folder{folders.length === 1 ? "" : "s"} here.
         </p>
       </div>
+
+      <StorageCapacityCard />
 
       <div
         role="button"

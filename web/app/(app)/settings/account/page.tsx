@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 function ProfileSection() {
   const { user, refetch } = useAuth();
@@ -69,6 +70,15 @@ function ProfileSection() {
         {isSaving ? "Saving…" : "Save changes"}
       </Button>
     </form>
+  );
+}
+
+function AppearanceSection() {
+  return (
+    <div className="space-y-3 rounded-md border border-border p-4">
+      <h2 className="font-medium">Appearance</h2>
+      <ThemeToggle />
+    </div>
   );
 }
 
@@ -203,6 +213,7 @@ export default function AccountSettingsPage() {
     <div className="max-w-md space-y-4">
       <h1 className="text-xl font-semibold">Account</h1>
       <ProfileSection />
+      <AppearanceSection />
       <PasswordSection />
       <DeleteAccountSection />
     </div>
