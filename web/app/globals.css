@@ -25,7 +25,7 @@
     --sb-item-py: clamp(0px, 0.65vh, 0.5rem);
     --sb-item-px: clamp(0.25rem, 1.5vh, 0.625rem);
     --sb-item-text: clamp(0.5rem, 2vh, 0.875rem);
-    --sb-icon: clamp(0.2rem, 1.5vh, 0.5rem);
+    --sb-icon: clamp(0.875rem, 2.5vh, 1.25rem);
     --sb-section-mt: clamp(1px, 1.2vh, 1rem);
     --sb-section-pt: clamp(1px, 1.2vh, 1rem);
     --sb-block-gap: clamp(0px, 1vh, 0.75rem);
