@@ -15,21 +15,12 @@ import { useUploads } from "@/lib/uploads";
 import { useAuth } from "@/lib/auth";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { MultiRingChart } from "@/components/ui/multi-ring-chart";
+import { CATEGORY_META, type StorageBreakdown } from "@/lib/storage-categories";
 
 interface StorageUsage {
   storageUsedBytes: string;
   storageQuotaBytes: string;
 }
-
-interface StorageBreakdown {
-  categories: { category: "documents" | "images" | "videos"; bytes: string }[];
-}
-
-const CATEGORY_META = {
-  documents: { label: "Documents", textClass: "text-accent", bgClass: "bg-accent" },
-  images: { label: "Images", textClass: "text-violet-400", bgClass: "bg-violet-400" },
-  videos: { label: "Videos", textClass: "text-foreground", bgClass: "bg-foreground" },
-} as const;
 
 function StorageCapacityCard() {
   const { data: usage } = useQuery({

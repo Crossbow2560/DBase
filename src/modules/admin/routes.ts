@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { config } from "../../config.js";
 import { AppError } from "../accounts/errors.js";
-import { resolveSession } from "../accounts/service.js";
+import { resolveSession, getStorageBreakdown, getSystemStorageBreakdown } from "../accounts/service.js";
 import * as admin from "./user-admin-service.js";
 import * as lifecycle from "../lifecycle/lifecycle-service.js";
 
@@ -115,6 +115,22 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get("/api/v1/admin/system-storage", { preHandler: requireAdmin }, async (_request, reply) => {
     const settings = await admin.getSystemStorageSettings();
     reply.send(settings);
+  });
+
+  // Backs the admin stats page's system-wide MultiRingChart — same shape as the per-user
+  // GET /users/me/storage-breakdown the home page's own MultiRingChart already consumes.
+  app.get("/api/v1/admin/system-storage-breakdown", { preHandler: requireAdmin }, async (_request, reply) => {
+    const breakdown = await getSystemStorageBreakdown();
+    reply.send(breakdown);
+  });
+
+  // Same breakdown, for whichever user the admin picks in the per-user selector — reuses the
+  // exact query a user runs on themselves, just without the requester === owner restriction
+  // (requireAdmin above is the gate here, same pattern as adminGetUserFiles).
+  app.get("/api/v1/admin/users/:id/storage-breakdown", { preHandler: requireAdmin }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const breakdown = await getStorageBreakdown(id);
+    reply.send(breakdown);
   });
 
   app.patch(

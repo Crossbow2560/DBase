@@ -300,7 +300,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
 
   return (
     <div
-      className="relative space-y-4"
+      className="relative space-y-3"
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -420,7 +420,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="w-10 px-4 py-2.5">
+                <th className="w-10 px-4 py-1.5">
                   <input
                     type="checkbox"
                     className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-transparent checked:border-accent checked:bg-accent"
@@ -429,11 +429,11 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                     aria-label="Select all"
                   />
                 </th>
-                <th className="px-2 py-2.5 font-medium">Name</th>
-                <th className="hidden w-28 px-4 py-2.5 font-medium sm:table-cell">Size</th>
-                <th className="hidden w-36 px-4 py-2.5 font-medium md:table-cell">Modified</th>
-                <th className="hidden px-4 py-2.5 font-medium lg:table-cell">Sharing</th>
-                <th className="w-12 px-4 py-2.5 font-medium"></th>
+                <th className="px-2 py-1.5 font-medium">Name</th>
+                <th className="hidden w-28 px-4 py-1.5 font-medium sm:table-cell">Size</th>
+                <th className="hidden w-36 px-4 py-1.5 font-medium md:table-cell">Modified</th>
+                <th className="hidden px-4 py-1.5 font-medium lg:table-cell">Sharing</th>
+                <th className="w-12 px-4 py-1.5 font-medium"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -454,7 +454,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                       dragOverFolderId === item.id && "bg-accent/20 ring-2 ring-inset ring-accent",
                     )}
                   >
-                    <td className="px-4 py-2.5 align-middle">
+                    <td className="px-4 py-1.5 align-middle">
                       <input
                         type="checkbox"
                         className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-transparent checked:border-accent checked:bg-accent"
@@ -463,7 +463,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                         aria-label={`Select ${item.name}`}
                       />
                     </td>
-                    <td className="px-2 py-2.5 align-middle">
+                    <td className="px-2 py-1.5 align-middle">
                       <div className="flex items-center gap-2.5">
                         {item.type === "folder" ? (
                           <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
@@ -496,16 +496,16 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                         </button>
                       </div>
                     </td>
-                    <td className="hidden px-4 py-2.5 align-middle text-muted-foreground sm:table-cell">
+                    <td className="hidden px-4 py-1.5 align-middle text-muted-foreground sm:table-cell">
                       {item.sizeBytes !== undefined ? formatBytes(Number(item.sizeBytes)) : "—"}
                     </td>
-                    <td className="hidden px-4 py-2.5 align-middle text-muted-foreground md:table-cell">
+                    <td className="hidden px-4 py-1.5 align-middle text-muted-foreground md:table-cell">
                       {formatDate(item.updatedAt)}
                     </td>
-                    <td className="hidden px-4 py-2.5 align-middle text-muted-foreground lg:table-cell">
+                    <td className="hidden px-4 py-1.5 align-middle text-muted-foreground lg:table-cell">
                       <SharingBadge itemType={item.type} itemId={item.id} />
                     </td>
-                    <td className="px-4 py-2.5 align-middle">
+                    <td className="px-4 py-1.5 align-middle">
                       <RowActionsMenu actions={actionsFor(item)} />
                     </td>
                   </tr>

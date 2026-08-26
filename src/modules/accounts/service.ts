@@ -290,6 +290,20 @@ type BreakdownRow = { category: "images" | "videos" | "documents"; bytes: bigint
  * categories read (a general one plus the two media-heavy ones users actually care to see split
  * out), without needing a longer, harder-to-maintain mime-type allowlist.
  */
+function rowsToBreakdown(rows: BreakdownRow[]) {
+  const byCategory: Record<string, string> = { documents: "0", images: "0", videos: "0" };
+  for (const row of rows) {
+    byCategory[row.category] = (row.bytes ?? 0n).toString();
+  }
+  return {
+    categories: [
+      { category: "documents" as const, bytes: byCategory.documents },
+      { category: "images" as const, bytes: byCategory.images },
+      { category: "videos" as const, bytes: byCategory.videos },
+    ],
+  };
+}
+
 export async function getStorageBreakdown(userId: string) {
   const rows = await db.$queryRaw<BreakdownRow[]>`
     SELECT
@@ -303,18 +317,26 @@ export async function getStorageBreakdown(userId: string) {
     WHERE owner_id = ${userId}::uuid AND deleted_at IS NULL AND upload_status = 'complete'
     GROUP BY category
   `;
+  return rowsToBreakdown(rows);
+}
 
-  const byCategory: Record<string, string> = { documents: "0", images: "0", videos: "0" };
-  for (const row of rows) {
-    byCategory[row.category] = (row.bytes ?? 0n).toString();
-  }
-  return {
-    categories: [
-      { category: "documents" as const, bytes: byCategory.documents },
-      { category: "images" as const, bytes: byCategory.images },
-      { category: "videos" as const, bytes: byCategory.videos },
-    ],
-  };
+/** Same breakdown as getStorageBreakdown above, but system-wide (no owner_id filter) — backs
+ * the admin stats page's system-wide donut, the same MultiRingChart the per-user Storage
+ * Capacity card uses, just scoped to every user's files instead of one. */
+export async function getSystemStorageBreakdown() {
+  const rows = await db.$queryRaw<BreakdownRow[]>`
+    SELECT
+      CASE
+        WHEN mime_type LIKE 'image/%' THEN 'images'
+        WHEN mime_type LIKE 'video/%' THEN 'videos'
+        ELSE 'documents'
+      END AS category,
+      SUM(size_bytes) AS bytes
+    FROM files
+    WHERE deleted_at IS NULL AND upload_status = 'complete'
+    GROUP BY category
+  `;
+  return rowsToBreakdown(rows);
 }
 
 export async function requestPasswordReset(email: string) {

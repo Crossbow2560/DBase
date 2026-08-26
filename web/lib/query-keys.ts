@@ -19,6 +19,8 @@ export const queryKeys = {
   adminUserFiles: (userId: string, folderId?: string) => ["admin", "users", userId, "files", folderId ?? null] as const,
   adminStats: () => ["admin", "stats"] as const,
   adminSystemStorage: () => ["admin", "system-storage"] as const,
+  adminSystemStorageBreakdown: () => ["admin", "system-storage-breakdown"] as const,
+  adminUserStorageBreakdown: (userId: string) => ["admin", "users", userId, "storage-breakdown"] as const,
   adminActivity: () => ["admin", "activity"] as const,
   adminFailedJobs: () => ["admin", "failed-jobs"] as const,
 } as const;

@@ -73,7 +73,7 @@ export function RowActionsMenu({ actions }: { actions: RowAction[] }) {
         type="button"
         onClick={() => (open ? setOpen(false) : openMenu())}
         className={cn(
-          "rounded-md p-1.5 text-muted-foreground opacity-100 transition-opacity hover:bg-muted hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100",
+          "rounded-md p-1 text-muted-foreground opacity-100 transition-opacity hover:bg-muted hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100",
           open && "opacity-100 bg-muted",
         )}
         aria-label="More actions"

@@ -277,7 +277,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               <span className="text-sm font-semibold">DBase</span>
             </div>
           </div>
-          <main className="flex-1 overflow-x-auto p-4 sm:p-6">{children}</main>
+          <main className="flex-1 overflow-x-auto p-4 sm:p-5">{children}</main>
         </div>
         <UploadTray />
       </div>
