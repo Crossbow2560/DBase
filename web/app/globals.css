@@ -19,13 +19,13 @@
   :root {
     --sb-pad: clamp(0.25rem, 2vh, 1rem);
     --sb-bar-h: clamp(2px, 0.6vh, 6px);
-    --sb-logo-mb: clamp(0.1rem, 1.5vh, 1rem);
+    --sb-logo-mb: clamp(0.125rem, 2vh, 1.5rem);
     --sb-logo-icon: clamp(1.25rem, 5vh, 2rem);
     --sb-item-gap: clamp(0px, 0.6vh, 0.375rem);
     --sb-item-py: clamp(0px, 0.65vh, 0.5rem);
     --sb-item-px: clamp(0.25rem, 1.5vh, 0.625rem);
     --sb-item-text: clamp(0.5rem, 2vh, 0.875rem);
-    --sb-icon: clamp(0.2rem, 1.5vh, 0.5rem);
+    --sb-icon: clamp(0.5rem, 2.1vh, 1rem);
     --sb-section-mt: clamp(1px, 1.2vh, 1rem);
     --sb-section-pt: clamp(1px, 1.2vh, 1rem);
     --sb-block-gap: clamp(0px, 1vh, 0.75rem);
