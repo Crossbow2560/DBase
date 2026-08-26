@@ -164,3 +164,31 @@ export async function getObjectStream(storageKey: string): Promise<Readable> {
 export async function putThumbnail(thumbnailKey: string, data: Buffer): Promise<void> {
   await client.putObject(BUCKET, thumbnailKey, data, undefined, { "Content-Type": "image/jpeg" });
 }
+
+/**
+ * Admin-triggered backup (admin/backup-service.ts): duplicates every object currently in BUCKET
+ * into a fresh, timestamped bucket via MinIO's server-side copy (same composeObject-style
+ * CopySourceOptions/CopyDestinationOptions used above) — bytes never round-trip through this
+ * process, so this stays cheap regardless of how large the store gets. Each run gets its own
+ * bucket rather than overwriting a single "backup" target, so an admin can keep more than one
+ * snapshot and a bad backup run can't clobber a previously-good one.
+ */
+export async function backupBucket(): Promise<{ backupBucket: string; objectCount: number }> {
+  // Bucket names must be lowercase and may only contain letters, digits, and hyphens — an ISO
+  // timestamp's colons and the fractional-second dot both violate that.
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").toLowerCase();
+  const backupBucketName = `${BUCKET}-backup-${timestamp}`;
+  await client.makeBucket(backupBucketName);
+
+  let objectCount = 0;
+  for await (const item of client.listObjectsV2(BUCKET, "", true)) {
+    if (!item.name) continue;
+    await client.copyObject(
+      new CopySourceOptions({ Bucket: BUCKET, Object: item.name }),
+      new CopyDestinationOptions({ Bucket: backupBucketName, Object: item.name }),
+    );
+    objectCount++;
+  }
+
+  return { backupBucket: backupBucketName, objectCount };
+}
