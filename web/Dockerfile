@@ -35,6 +35,7 @@ ENV PORT=3001
 # HOSTNAME here forces the bind-all-interfaces path instead. Found by actually curling the
 # published port after `docker compose up` and getting connection refused despite healthy logs.
 ENV HOSTNAME=0.0.0.0
+COPY --from=build /app/public ./public
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 
