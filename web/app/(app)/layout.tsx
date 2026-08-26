@@ -161,14 +161,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               </div>
             </div>
 
-            {/* The three nav lists and the account block (below) are flex children of this
-                container with a capped gap between them, rather than each stacking with its own
-                fixed margin — a bounded middle ground between "always cramped" and the earlier
-                justify-evenly attempt, which handed ALL leftover vertical space to these gaps and
-                on a tall viewport ballooned them past 100px. Past --sb-group-gap's own cap, any
-                extra space just sits as empty room at the bottom, which is how most sidebars
-                behave anyway. */}
-            <div className="flex min-h-0 flex-1 flex-col" style={{ gap: "var(--sb-group-gap)" }}>
+            {/* The three nav lists stack with a capped gap between them — not flex-1/stretched,
+                just their own natural height. Any leftover vertical space in the sidebar now
+                collects below this block (inside the flex-1 wrapper it sits in) rather than
+                being distributed as ever-larger gaps here or pinning the account block right
+                underneath it — that's what pushes the account block down to the very bottom
+                below, instead of it trailing right after ADMINISTRATION with the empty room
+                stuck in between the two. */}
+            <div className="flex flex-col" style={{ gap: "var(--sb-group-gap)" }}>
             <nav className="flex flex-col" style={{ gap: "var(--sb-item-gap)" }}>
               {NAV_LINKS.map((link) => (
                 <Link
@@ -225,41 +225,38 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               </nav>
             )}
 
-            {/* Deliberately a peer of the three <nav> lists above within the same
-                justify-evenly container, not a separately-pinned block below it — an earlier
-                version kept this outside, and on a tall viewport the one gap in front of it
-                (from the outer flex layout just pushing it to the very bottom) ended up
-                visibly bigger than the gaps between nav sections, defeating the point of
-                spacing everything evenly. As a peer here, "the gap before this block" is one
-                of the same justify-evenly-computed gaps as all the others. */}
-            <div className="flex shrink-0 flex-col" style={{ gap: "var(--sb-block-gap)" }}>
-              <QuotaIndicator />
+            </div>
+          </div>
+
+          {/* Pinned to the very bottom of the sidebar — a sibling of the flex-1 wrapper above,
+              not nested inside it, so whatever room the nav lists don't use collects here as a
+              gap above this block rather than right after ADMINISTRATION. */}
+          <div className="flex shrink-0 flex-col" style={{ gap: "var(--sb-block-gap)" }}>
+            <QuotaIndicator />
+            <div
+              className="flex items-center gap-2 border-t border-border text-sm"
+              style={{ paddingTop: "var(--sb-block-gap)" }}
+            >
               <div
-                className="flex items-center gap-2 border-t border-border text-sm"
-                style={{ paddingTop: "var(--sb-block-gap)" }}
+                className="flex shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium"
+                style={{ height: "var(--sb-avatar)", width: "var(--sb-avatar)" }}
               >
-                <div
-                  className="flex shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium"
-                  style={{ height: "var(--sb-avatar)", width: "var(--sb-avatar)" }}
-                >
-                  {user.displayName?.[0]?.toUpperCase() ?? "?"}
-                </div>
-                <div className="min-w-0 flex-1 leading-none">
-                  <div className="truncate font-medium">{user.displayName}</div>
-                  <div className="mt-[var(--sb-item-gap)] truncate text-xs text-muted-foreground">{user.email}</div>
-                </div>
+                {user.displayName?.[0]?.toUpperCase() ?? "?"}
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleLogout}
-                className="w-full shrink-0"
-                style={{ height: "var(--sb-logout-h)" }}
-              >
-                Log out
-              </Button>
+              <div className="min-w-0 flex-1 leading-none">
+                <div className="truncate font-medium">{user.displayName}</div>
+                <div className="mt-[var(--sb-item-gap)] truncate text-xs text-muted-foreground">{user.email}</div>
+              </div>
             </div>
-            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleLogout}
+              className="w-full shrink-0"
+              style={{ height: "var(--sb-logout-h)" }}
+            >
+              Log out
+            </Button>
           </div>
         </aside>
 
