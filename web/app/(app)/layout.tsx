@@ -149,15 +149,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         >
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="mb-[var(--sb-logo-mb)] flex shrink-0 items-center gap-2.5 px-1">
-              <div
-                className="flex shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground"
+              <img
+                src="/logo.png"
+                alt=""
+                className="shrink-0 object-contain"
                 style={{ height: "var(--sb-logo-icon)", width: "var(--sb-logo-icon)" }}
-              >
-                <LayoutGrid className="h-4 w-4" aria-hidden />
-              </div>
+              />
               <div>
-                <div className="text-sm font-semibold leading-tight">DBase</div>
-                <div className="text-xs leading-tight text-muted-foreground">Enterprise Storage</div>
+                <div className="text-base font-extrabold font-semibold leading-tight">DBase</div>
               </div>
             </div>
 
@@ -271,9 +270,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
               <Menu className="h-5 w-5" aria-hidden />
             </button>
             <div className="flex items-center gap-2">
-              <div className="flex h-6 w-6 items-center justify-center rounded-md bg-accent text-accent-foreground">
-                <LayoutGrid className="h-3.5 w-3.5" aria-hidden />
-              </div>
+              <img src="/logo.png" alt="" className="h-11 w-11 shrink-0 object-contain" />
               <span className="text-sm font-semibold">DBase</span>
             </div>
           </div>

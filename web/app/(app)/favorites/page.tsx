@@ -195,7 +195,7 @@ export default function FavoritesPage() {
                 type="button"
                 onClick={() => unfavorite(item)}
                 title="Remove from favorites"
-                className="absolute right-1.5 top-1.5 z-10 rounded-full bg-background/80 p-1 text-accent opacity-100 transition-opacity hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100"
+                className="absolute right-1.5 top-1.5 z-10 rounded-full bg-background p-1 text-accent opacity-100 transition-opacity hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100"
               >
                 <Star className="h-3.5 w-3.5" fill="currentColor" aria-hidden />
               </button>

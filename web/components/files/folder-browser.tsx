@@ -423,7 +423,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                 <th className="w-10 px-4 py-1.5">
                   <input
                     type="checkbox"
-                    className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-transparent checked:border-accent checked:bg-accent"
+                    className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-background checked:border-accent checked:bg-accent"
                     checked={selectedIds.size > 0 && selectedIds.size === data.items.length}
                     onChange={toggleSelectAll}
                     aria-label="Select all"
@@ -457,7 +457,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                     <td className="px-4 py-1.5 align-middle">
                       <input
                         type="checkbox"
-                        className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-transparent checked:border-accent checked:bg-accent"
+                        className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-background checked:border-accent checked:bg-accent"
                         checked={isSelected}
                         onChange={() => toggleSelected(item.id)}
                         aria-label={`Select ${item.name}`}
@@ -541,7 +541,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                 onChange={() => toggleSelected(item.id)}
                 aria-label={`Select ${item.name}`}
                 className={cn(
-                  "absolute left-1.5 top-1.5 z-10 h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-background/80 opacity-100 transition-opacity checked:border-accent checked:bg-accent sm:opacity-0 sm:group-hover:opacity-100",
+                  "absolute left-1.5 top-1.5 z-10 h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-background opacity-100 transition-opacity checked:border-accent checked:bg-accent sm:opacity-0 sm:group-hover:opacity-100",
                   isSelected && "opacity-100",
                 )}
               />
@@ -550,7 +550,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                 onClick={() => toggleFavorite(item)}
                 title="Favorite"
                 className={cn(
-                  "absolute right-1.5 top-1.5 z-10 rounded-full bg-background/80 p-1 text-muted-foreground opacity-100 transition-opacity hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100",
+                  "absolute right-1.5 top-1.5 z-10 rounded-full bg-background p-1 text-muted-foreground opacity-100 transition-opacity hover:text-foreground sm:opacity-0 sm:group-hover:opacity-100",
                   favoritedIds.has(item.id) && "opacity-100 text-accent",
                 )}
               >
