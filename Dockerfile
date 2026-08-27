@@ -34,6 +34,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/scripts ./scripts
+# scripts/migrate.ts (npm run migrate) reads these directly at runtime — without this the
+# runtime image has no supabase/ directory at all, and `docker compose run --rm backend npm run
+# migrate` fails with ENOENT scanning /app/supabase/migrations (real bug, found by actually
+# running the deploy workflow's migration step rather than just building the image).
+COPY --from=build /app/supabase ./supabase
 COPY package.json ./
 
 EXPOSE 3000
