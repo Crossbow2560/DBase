@@ -23,16 +23,17 @@ See [APPLICATION_DESIGN.md](APPLICATION_DESIGN.md), [REQUIREMENTS.md](REQUIREMEN
    ```
 
 2. Fill in `.env`. This is the **single config file for the whole app** — backend, frontend, and docker-compose all read it (there's no separate `web/.env.local` anymore):
-   - `DATABASE_URL` / `DIRECT_URL` — from your Supabase dashboard under **Project Settings → Database → Connection string**. `DATABASE_URL` must be the pooled (port 6543) connection string; `DIRECT_URL` must be the direct (port 5432) one — it's only used for `prisma db pull`/`prisma generate`.
+   - `DATABASE_URL` / `DIRECT_URL` — from your Supabase dashboard under **Project Settings → Database → Connection string**. `DATABASE_URL` must be the pooled (port 6543) connection string; `DIRECT_URL` must be the direct (port 5432) one — used for `prisma db pull`/`prisma generate` and by `npm run migrate` (below).
    - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — credentials for the MinIO container.
    - `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` — set these to the same values as `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` (only needed when running the backend outside Docker; Docker Compose maps them automatically).
    - `PORT` / `FRONTEND_PORT` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` — change any of these if the default collides with something else already running on the machine (another app, another MinIO instance, etc). Each one drives both the container's internal port and its published host port, so one number is all you need per service.
    - Leave the other defaults unless you have a reason to change them.
 
-3. Apply the database schema. This app **does not use `prisma migrate`** — the schema lives in `supabase/migrations/`, applied through the Supabase dashboard/CLI. Once the Supabase database has the migrations applied, generate the Prisma client against it:
+3. Apply the database schema. This app **does not use `prisma migrate`** — the schema lives in `supabase/migrations/`, applied via `scripts/migrate.ts` (`npm run migrate`), a plain SQL runner that tracks what it's already applied in a `_migrations` table so re-running it is a no-op once caught up. `.github/workflows/deploy.yml` runs this automatically on every deploy; for local setup, run it once yourself, then generate the Prisma client against the now-up-to-date database:
 
    ```bash
    npm install
+   npm run migrate
    npm run prisma:generate
    ```
 

@@ -18,6 +18,16 @@ jobs:
       - name: Build images
         run: docker compose build
 
+      # scripts/migrate.ts (npm run migrate) — applies any not-yet-applied file under
+      # supabase/migrations/, in order, recording each in a `_migrations` table so this is a
+      # no-op once caught up. A one-off run of the freshly-built backend image, before the
+      # `up -d` below (re)starts the long-running containers, so schema changes a new release
+      # depends on are always in place before its code starts serving traffic. Reuses the
+      # backend service's own `environment:` (DATABASE_URL etc.) from docker-compose.yml —
+      # `docker compose run` inherits it the same way `up` does, no separate wiring needed.
+      - name: Apply database migrations
+        run: docker compose run --rm backend npm run migrate
+
       - name: Restart services
         run: docker compose up -d --remove-orphans
 

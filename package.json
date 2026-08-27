@@ -13,7 +13,8 @@
     "start": "node dist/src/server.js",
     "prisma:pull": "prisma db pull",
     "prisma:generate": "prisma generate",
-    "bootstrap:admin": "tsx scripts/bootstrap-admin.ts"
+    "bootstrap:admin": "tsx scripts/bootstrap-admin.ts",
+    "migrate": "tsx scripts/migrate.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
@@ -24,12 +25,14 @@
     "dotenv": "^16.4.7",
     "fastify": "^5.2.0",
     "minio": "^8.0.3",
+    "pg": "^8.23.0",
     "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.23.1",
     "prisma": "^6.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
