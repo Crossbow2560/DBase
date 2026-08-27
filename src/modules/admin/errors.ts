@@ -10,3 +10,6 @@ export const lastAdminStanding = () =>
 
 export const invalidStorageLimit = () =>
   new AppError(400, "VALIDATION_ERROR", "Storage limit must be a non-negative integer number of bytes.");
+
+export const backupNotFound = () =>
+  new AppError(404, "NOT_FOUND", "That backup no longer exists — it may have been deleted directly in MinIO.");

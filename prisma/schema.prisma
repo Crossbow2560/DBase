@@ -310,6 +310,7 @@ enum activity_action {
   account_reactivate
   account_delete
   backup_run
+  backup_restore
 }
 
 // Deliberately no relations to `users` here — actor_id/subject_user_id are plain uuid columns

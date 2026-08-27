@@ -23,6 +23,7 @@ export const queryKeys = {
   adminUserStorageBreakdown: (userId: string) => ["admin", "users", userId, "storage-breakdown"] as const,
   adminActivity: () => ["admin", "activity"] as const,
   adminFailedJobs: () => ["admin", "failed-jobs"] as const,
+  adminBackups: () => ["admin", "backups"] as const,
 } as const;
 
 /**

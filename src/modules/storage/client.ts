@@ -173,11 +173,13 @@ export async function putThumbnail(thumbnailKey: string, data: Buffer): Promise<
  * bucket rather than overwriting a single "backup" target, so an admin can keep more than one
  * snapshot and a bad backup run can't clobber a previously-good one.
  */
+const BACKUP_BUCKET_PREFIX = `${BUCKET}-backup-`;
+
 export async function backupBucket(): Promise<{ backupBucket: string; objectCount: number }> {
   // Bucket names must be lowercase and may only contain letters, digits, and hyphens — an ISO
   // timestamp's colons and the fractional-second dot both violate that.
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").toLowerCase();
-  const backupBucketName = `${BUCKET}-backup-${timestamp}`;
+  const backupBucketName = `${BACKUP_BUCKET_PREFIX}${timestamp}`;
   await client.makeBucket(backupBucketName);
 
   let objectCount = 0;
@@ -191,4 +193,53 @@ export async function backupBucket(): Promise<{ backupBucket: string; objectCoun
   }
 
   return { backupBucket: backupBucketName, objectCount };
+}
+
+/**
+ * Every bucket backupBucket() above has ever produced, newest first — the admin restore UI's
+ * picklist. Filtered to the `${BUCKET}-backup-` prefix rather than returning every bucket in the
+ * account so an unrelated bucket some other process created on the same MinIO instance can never
+ * show up as a "restore" candidate.
+ */
+export async function listBackupBuckets(): Promise<{ name: string; createdAt: Date }[]> {
+  const buckets = await client.listBuckets();
+  return buckets
+    .filter((b) => b.name.startsWith(BACKUP_BUCKET_PREFIX))
+    .map((b) => ({ name: b.name, createdAt: b.creationDate }))
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+}
+
+/**
+ * Copies every object from a previously-made backup bucket back into the live BUCKET, overwriting
+ * whatever currently sits at each key. Deliberately does NOT delete anything from BUCKET that
+ * isn't present in the backup — every storage_key in this app is an opaque random name
+ * (generateStorageKey/generateThumbnailKey above), so restoring is "put back these exact bytes at
+ * these exact keys," not "make BUCKET's key set match the backup's," and a file created after the
+ * backup was taken has no reason to disappear just because an older snapshot is being restored.
+ *
+ * `backupBucketName` MUST be validated by the caller against listBackupBuckets()'s own output
+ * (admin/backup-service.ts) before this is called — this only re-checks the prefix as a last-
+ * resort guard, not the primary defense, since accepting an arbitrary caller-supplied bucket name
+ * here would let a restore read from any bucket this MinIO credential can see.
+ */
+export async function restoreBucket(backupBucketName: string): Promise<{ objectCount: number }> {
+  if (!backupBucketName.startsWith(BACKUP_BUCKET_PREFIX)) {
+    throw new Error(`Refusing to restore from non-backup bucket "${backupBucketName}".`);
+  }
+  const exists = await client.bucketExists(backupBucketName);
+  if (!exists) {
+    throw new Error(`Backup bucket "${backupBucketName}" does not exist.`);
+  }
+
+  let objectCount = 0;
+  for await (const item of client.listObjectsV2(backupBucketName, "", true)) {
+    if (!item.name) continue;
+    await client.copyObject(
+      new CopySourceOptions({ Bucket: backupBucketName, Object: item.name }),
+      new CopyDestinationOptions({ Bucket: BUCKET, Object: item.name }),
+    );
+    objectCount++;
+  }
+
+  return { objectCount };
 }

@@ -164,14 +164,29 @@ export async function adminRoutes(app: FastifyInstance) {
     reply.send({ jobs });
   });
 
-  // Stricter than writeHeavyRateLimit above — this walks and server-side-copies every object in
-  // the bucket, so it's the one admin action here with a real per-call cost worth throttling
-  // harder than a routine PATCH.
+  // Stricter than writeHeavyRateLimit above — these walk and server-side-copy every object in a
+  // bucket, so they're the admin actions here with a real per-call cost worth throttling harder
+  // than a routine PATCH.
+  const backupRateLimit = { config: { rateLimit: { max: 3, timeWindow: "10 minutes" } } } as const;
+
+  app.post("/api/v1/admin/backup", { preHandler: requireAdmin, ...backupRateLimit }, async (request, reply) => {
+    const result = await backup.runBackup(request.session!.user_id);
+    reply.send(result);
+  });
+
+  // The restore page's picklist of available backups — cheap (one listBuckets call), so this
+  // deliberately isn't behind backupRateLimit above.
+  app.get("/api/v1/admin/backups", { preHandler: requireAdmin }, async (_request, reply) => {
+    const backups = await backup.listBackups();
+    reply.send({ backups });
+  });
+
   app.post(
-    "/api/v1/admin/backup",
-    { preHandler: requireAdmin, config: { rateLimit: { max: 3, timeWindow: "10 minutes" } } },
+    "/api/v1/admin/backups/:name/restore",
+    { preHandler: requireAdmin, ...backupRateLimit },
     async (request, reply) => {
-      const result = await backup.runBackup(request.session!.user_id);
+      const { name } = request.params as { name: string };
+      const result = await backup.restoreBackup(request.session!.user_id, name);
       reply.send(result);
     },
   );
