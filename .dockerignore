@@ -4,6 +4,5 @@ dist
 .env.local
 .git
 web
-supabase
 *.md
 *.log
