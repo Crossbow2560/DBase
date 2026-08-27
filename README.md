@@ -23,7 +23,7 @@ See [APPLICATION_DESIGN.md](APPLICATION_DESIGN.md), [REQUIREMENTS.md](REQUIREMEN
    ```
 
 2. Fill in `.env`. This is the **single config file for the whole app** — backend, frontend, and docker-compose all read it (there's no separate `web/.env.local` anymore):
-   - `DATABASE_URL` / `DIRECT_URL` — from your Supabase dashboard under **Project Settings → Database → Connection string**. `DATABASE_URL` must be the pooled (port 6543) connection string; `DIRECT_URL` must be the direct (port 5432) one — used for `prisma db pull`/`prisma generate` and by `npm run migrate` (below).
+   - `DATABASE_URL` / `DIRECT_URL` — from your Supabase dashboard under **Project Settings → Database → Connection string**. `DATABASE_URL` must be the pooled (port 6543) connection string — this is what the running app and `npm run migrate` both use. `DIRECT_URL` must be the direct (port 5432) one, used for `prisma db pull`/`prisma generate`; note it only accepts IPv6, so it won't work as a fallback for `npm run migrate` on an IPv4-only host.
    - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — credentials for the MinIO container.
    - `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` — set these to the same values as `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` (only needed when running the backend outside Docker; Docker Compose maps them automatically).
    - `PORT` / `FRONTEND_PORT` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` — change any of these if the default collides with something else already running on the machine (another app, another MinIO instance, etc). Each one drives both the container's internal port and its published host port, so one number is all you need per service.

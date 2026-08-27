@@ -11,10 +11,15 @@
 // parameter-less query string — runs a whole multi-statement file exactly the way `psql` does;
 // Prisma's raw-query methods are not guaranteed to.
 //
-// Uses DIRECT_URL when set, not DATABASE_URL's Supavisor transaction-pooler connection
-// (APPLICATION_DESIGN.md §1.3.1) — pooled transaction-mode connections don't support every
-// session-level DDL feature, and this only ever runs once per deploy, not on the request hot
-// path, so there's no pooling concern to trade against here.
+// Uses DATABASE_URL (Supavisor's transaction-pooler connection, APPLICATION_DESIGN.md §1.3.1),
+// not DIRECT_URL — found as a real deploy failure: DIRECT_URL's host
+// (db.<ref>.supabase.co) only accepts IPv6, which this app's self-hosted Ubuntu runner has no
+// outbound route to, while the pooler host is IPv4-reachable and is what the running app
+// already talks to successfully via this same var. Transaction-mode pooling is not a problem
+// here despite the name — each migration file below runs inside its own explicit
+// begin/commit, so Supavisor holds one real backend connection for that whole transaction
+// either way; DIRECT_URL is kept as a fallback purely for a local dev machine that does have
+// IPv6 and no DATABASE_URL configured.
 //
 // Usage: npm run migrate
 
@@ -28,9 +33,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.join(__dirname, "..", "supabase", "migrations");
 
 async function main() {
-  const connectionString = process.env.DIRECT_URL ?? process.env.DATABASE_URL;
+  const connectionString = process.env.DATABASE_URL ?? process.env.DIRECT_URL;
   if (!connectionString) {
-    console.error("Missing DIRECT_URL/DATABASE_URL — nothing to connect to.");
+    console.error("Missing DATABASE_URL/DIRECT_URL — nothing to connect to.");
     process.exit(1);
   }
 

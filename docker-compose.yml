@@ -9,11 +9,11 @@ services:
       - "${PORT:-3000}:${PORT:-3000}"
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      # Not read by the running server itself — only by scripts/migrate.ts (npm run migrate),
-      # which the deploy workflow runs as a one-off `docker compose run --rm backend` using this
-      # same service definition (.github/workflows/deploy.yml). Without this, that script would
-      # silently fall back to DATABASE_URL's pooled Supavisor connection, which some DDL here
-      # (session-level features under transaction-mode pooling) isn't guaranteed to support.
+      # Not read by the running server itself — only by scripts/migrate.ts (npm run migrate) as a
+      # fallback if DATABASE_URL above is ever unset. migrate.ts uses DATABASE_URL by default, not
+      # this: DIRECT_URL's host only accepts IPv6, which this app's self-hosted runner has no
+      # outbound route to (real deploy failure, see migrate.ts's own comment for the full story) —
+      # kept wired through mainly so a machine that DOES have IPv6 (e.g. local dev) still works.
       DIRECT_URL: ${DIRECT_URL}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-dbase_session}
       SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
