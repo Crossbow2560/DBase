@@ -7,8 +7,15 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Paperclip } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
+
+interface Attachment {
+  id: string | null;
+  filename: string;
+  contentType: string | null;
+}
 
 interface ReceivedEmail {
   id: string;
@@ -18,6 +25,7 @@ interface ReceivedEmail {
   subject: string | null;
   textBody: string | null;
   htmlBody: string | null;
+  attachments: Attachment[];
   receivedAt: string;
 }
 
@@ -95,6 +103,21 @@ export default function AdminReceivedMailPage() {
                     {new Date(selected.receivedAt).toLocaleString()}
                   </div>
                 </div>
+
+                {selected.attachments.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {selected.attachments.map((att, i) => (
+                      <span
+                        key={att.id ?? i}
+                        className="inline-flex items-center gap-1.5 rounded border border-border bg-muted/40 px-2 py-1 text-xs"
+                        title={att.contentType ?? undefined}
+                      >
+                        <Paperclip className="h-3 w-3" aria-hidden />
+                        {att.filename}
+                      </span>
+                    ))}
+                  </div>
+                )}
 
                 {selected.textBody ? (
                   <pre className="whitespace-pre-wrap break-words font-sans text-sm">

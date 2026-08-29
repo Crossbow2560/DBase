@@ -1,5 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { db } from "../../db.js";
+import { config } from "../../config.js";
+
+interface AttachmentMeta {
+  id: string | null;
+  filename: string;
+  contentType: string | null;
+}
 
 /**
  * Verifies a Resend (Svix) webhook signature. Resend signs every webhook with Svix: the signed
@@ -81,11 +89,64 @@ function pickHeader(headers: Record<string, string>, name: string): string | und
 }
 
 /**
- * Persists one inbound message. Defensive about the exact payload shape (Resend's inbound
- * feature is young and the field names have moved around) — reads `body.data` if present,
- * otherwise the body itself, and tolerates both string and object address/header forms.
+ * The email.received webhook is metadata-only — no body, no headers, no attachment bytes (Resend
+ * designed it that way so serverless handlers with small request-body limits still work). The
+ * body/headers/attachment list come from a follow-up call to GET /emails/receiving/{id}. Returns
+ * null when there's no API key configured or the call fails — the caller then stores whatever
+ * little the webhook itself carried.
+ * https://resend.com/docs/dashboard/receiving/get-email-content
+ */
+async function fetchReceivedEmail(emailId: string): Promise<{
+  text: string | null;
+  html: string | null;
+  headers: Record<string, string>;
+  attachments: AttachmentMeta[];
+} | null> {
+  if (!config.email.resendApiKey) return null;
+
+  let res: Response;
+  try {
+    res = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(emailId)}`, {
+      headers: { Authorization: `Bearer ${config.email.resendApiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch (err) {
+    console.error(`[inbound] fetch ${emailId} threw:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+
+  if (!res.ok) {
+    console.error(`[inbound] fetch ${emailId} -> ${res.status}: ${await res.text().catch(() => "")}`);
+    return null;
+  }
+
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  const attachments: AttachmentMeta[] = Array.isArray(body.attachments)
+    ? body.attachments.map((a) => {
+        const obj = (a ?? {}) as Record<string, unknown>;
+        return {
+          id: obj.id != null ? String(obj.id) : null,
+          filename: obj.filename != null ? String(obj.filename) : "attachment",
+          contentType: obj.content_type != null ? String(obj.content_type) : null,
+        };
+      })
+    : [];
+
+  return {
+    text: body.text != null ? String(body.text) : null,
+    html: body.html != null ? String(body.html) : null,
+    headers: normalizeHeaders(body.headers),
+    attachments,
+  };
+}
+
+/**
+ * Persists one inbound message. Parses the metadata off the webhook, then enriches it with the
+ * body/headers/attachments from fetchReceivedEmail() above. Defensive about the exact webhook
+ * shape (reads `body.data` if present, else the body itself; tolerates string/object addresses).
  *
- * Returns whether a row was actually inserted (false = duplicate Message-ID, already stored).
+ * Returns whether a row was actually inserted (false = duplicate Message-ID, already stored — in
+ * which case a redelivery that now carries body content backfills the earlier metadata-only row).
  */
 export async function storeInboundEmail(body: unknown): Promise<boolean> {
   const root = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
@@ -93,7 +154,7 @@ export async function storeInboundEmail(body: unknown): Promise<boolean> {
 
   const from = firstAddress(data.from ?? data.sender ?? data.from_address);
   const to = firstAddress(data.to ?? data.recipient ?? data.to_address);
-  const headers = normalizeHeaders(data.headers);
+  let headers = normalizeHeaders(data.headers);
 
   const messageId =
     (typeof data.message_id === "string" && data.message_id) ||
@@ -103,10 +164,32 @@ export async function storeInboundEmail(body: unknown): Promise<boolean> {
     null;
 
   const subject = data.subject != null ? String(data.subject) : null;
-  const textBody =
+  let textBody =
     data.text != null ? String(data.text) : data.text_body != null ? String(data.text_body) : null;
-  const htmlBody =
+  let htmlBody =
     data.html != null ? String(data.html) : data.html_body != null ? String(data.html_body) : null;
+  let attachments: AttachmentMeta[] = Array.isArray(data.attachments)
+    ? data.attachments.map((a) => {
+        const obj = (a ?? {}) as Record<string, unknown>;
+        return {
+          id: obj.id != null ? String(obj.id) : null,
+          filename: obj.filename != null ? String(obj.filename) : "attachment",
+          contentType: obj.content_type != null ? String(obj.content_type) : null,
+        };
+      })
+    : [];
+
+  const emailId =
+    (typeof data.email_id === "string" && data.email_id) || (typeof data.id === "string" && data.id) || null;
+  if (emailId) {
+    const fetched = await fetchReceivedEmail(emailId);
+    if (fetched) {
+      textBody = fetched.text ?? textBody;
+      htmlBody = fetched.html ?? htmlBody;
+      if (Object.keys(fetched.headers).length > 0) headers = fetched.headers;
+      if (fetched.attachments.length > 0) attachments = fetched.attachments;
+    }
+  }
 
   const receivedRaw = data.created_at ?? root.created_at ?? data.date;
   const receivedAt = receivedRaw ? new Date(String(receivedRaw)) : new Date();
@@ -122,15 +205,30 @@ export async function storeInboundEmail(body: unknown): Promise<boolean> {
         text_body: textBody,
         html_body: htmlBody,
         headers,
+        attachments: attachments as unknown as Prisma.InputJsonValue,
         raw: (body ?? {}) as object,
         received_at: Number.isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
       },
     });
     return true;
   } catch (err) {
-    // Unique violation on message_id => Resend redelivered a message we already stored. That's a
-    // success from the webhook's point of view (return 2xx so Resend stops retrying).
-    if (err && typeof err === "object" && (err as { code?: string }).code === "P2002") return false;
+    // Unique violation on message_id => Resend redelivered a message we already stored. Return
+    // 2xx so Resend stops retrying — but if the earlier attempt only had metadata (the API fetch
+    // failed then) and this one has the body, backfill it.
+    if (err && typeof err === "object" && (err as { code?: string }).code === "P2002") {
+      if (messageId && (textBody || htmlBody || attachments.length > 0)) {
+        await db.received_emails.updateMany({
+          where: { message_id: messageId, text_body: null, html_body: null },
+          data: {
+            text_body: textBody,
+            html_body: htmlBody,
+            headers,
+            attachments: attachments as unknown as Prisma.InputJsonValue,
+          },
+        });
+      }
+      return false;
+    }
     throw err;
   }
 }
@@ -148,6 +246,7 @@ export async function listReceivedEmails(limit = 200) {
     subject: r.subject,
     textBody: r.text_body,
     htmlBody: r.html_body,
+    attachments: (Array.isArray(r.attachments) ? r.attachments : []) as unknown as AttachmentMeta[],
     receivedAt: r.received_at.toISOString(),
   }));
 }
