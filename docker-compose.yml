@@ -29,6 +29,12 @@ services:
       # end-to-end without real email infra configured. Set both to actually send email.
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-onboarding@resend.dev}
+      # Inbound mail (POST /api/v1/email/inbound, src/modules/email/routes.ts). Unset by default —
+      # the endpoint rejects every request with 401 INBOUND_NOT_CONFIGURED until the Svix signing
+      # secret ("whsec_...") from the Resend inbound webhook is set here. Compose only forwards
+      # vars a service's `environment:` explicitly names, so setting it in .env alone does nothing.
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      EMAIL_INBOUND_ADDRESS: ${EMAIL_INBOUND_ADDRESS:-dbase@nishit-db.com}
       PORT: ${PORT:-3000}
       # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
       # IMPLEMENTATION_PHASES.md Subcomponent 1) that will actually talk to MinIO isn't built.
