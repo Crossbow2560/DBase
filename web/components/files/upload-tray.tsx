@@ -32,7 +32,7 @@ export function UploadTray() {
               <div className="flex items-center gap-2 text-sm">
                 <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                 <span className="min-w-0 flex-1 truncate font-medium">{task.fileName}</span>
-                {(task.status === "uploading" || task.status === "paused") && (
+                {(task.status === "queued" || task.status === "uploading" || task.status === "paused") && (
                   <button
                     type="button"
                     onClick={() => cancel(task.id)}
@@ -56,6 +56,8 @@ export function UploadTray() {
               <div className="mt-1 text-xs text-muted-foreground">
                 {task.status === "error" ? (
                   task.error
+                ) : task.status === "queued" ? (
+                  <>Queued — {formatBytes(task.totalBytes)}</>
                 ) : (
                   <>
                     {formatBytes(task.uploadedBytes)} of {formatBytes(task.totalBytes)}

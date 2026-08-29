@@ -11,11 +11,29 @@ import { config } from "../config.js";
 export function renderEmailLayout(options: {
   heading: string;
   bodyHtml: string;
-  buttonLabel: string;
-  buttonUrl: string;
+  // Omit both to render a plain message with no call-to-action button — used by the admin
+  // "send mail" tool, which just wants the DBase-skinned shell around free-form text.
+  buttonLabel?: string;
+  buttonUrl?: string;
 }): string {
   const { heading, bodyHtml, buttonLabel, buttonUrl } = options;
   const logoUrl = `${config.publicAppUrl}/logo.png`;
+
+  const ctaHtml =
+    buttonLabel && buttonUrl
+      ? `
+        <table role="presentation" cellpadding="0" cellspacing="0" style="margin:28px 0;">
+          <tr>
+            <td style="background-color:#1A1A1A;">
+              <a href="${buttonUrl}" style="display:inline-block;padding:12px 28px;font-size:15px;font-weight:600;color:#F7F4EE;text-decoration:none;">${buttonLabel}</a>
+            </td>
+          </tr>
+        </table>
+        <p style="font-size:13px;color:#433D37;word-break:break-all;">
+          Or copy and paste this link into your browser:<br>
+          <a href="${buttonUrl}" style="color:#D46F35;">${buttonUrl}</a>
+        </p>`
+      : "";
 
   return `
 <div style="background-color:#F7F4EE;background-image:radial-gradient(#1A1A1A14 1px, transparent 1px);background-size:22px 22px;padding:32px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -36,17 +54,7 @@ export function renderEmailLayout(options: {
       <td style="padding:32px;">
         <h1 style="margin:0 0 16px;font-size:20px;font-weight:400;letter-spacing:-0.01em;color:#1A1A1A;">${heading}</h1>
         <div style="font-size:15px;line-height:1.6;color:#1A1A1A;">${bodyHtml}</div>
-        <table role="presentation" cellpadding="0" cellspacing="0" style="margin:28px 0;">
-          <tr>
-            <td style="background-color:#1A1A1A;">
-              <a href="${buttonUrl}" style="display:inline-block;padding:12px 28px;font-size:15px;font-weight:600;color:#F7F4EE;text-decoration:none;">${buttonLabel}</a>
-            </td>
-          </tr>
-        </table>
-        <p style="font-size:13px;color:#433D37;word-break:break-all;">
-          Or copy and paste this link into your browser:<br>
-          <a href="${buttonUrl}" style="color:#D46F35;">${buttonUrl}</a>
-        </p>
+        ${ctaHtml}
       </td>
     </tr>
     <tr>

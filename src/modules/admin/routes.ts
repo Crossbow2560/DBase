@@ -5,6 +5,7 @@ import { resolveSession, getStorageBreakdown, getSystemStorageBreakdown } from "
 import * as admin from "./user-admin-service.js";
 import * as lifecycle from "../lifecycle/lifecycle-service.js";
 import * as backup from "./backup-service.js";
+import { sendAdminEmail } from "./notify-service.js";
 
 async function requireSession(request: FastifyRequest) {
   const rawToken = request.cookies[config.sessionCookieName];
@@ -150,6 +151,30 @@ export async function adminRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { totalStorageLimitBytes } = request.body as { totalStorageLimitBytes: number };
       await admin.setSystemStorageLimit(request.session!.user_id, totalStorageLimitBytes);
+      reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/api/v1/admin/send-email",
+    {
+      preHandler: requireAdmin,
+      ...writeHeavyRateLimit,
+      schema: {
+        body: {
+          type: "object",
+          required: ["to", "subject", "body"],
+          properties: {
+            to: { type: "string" },
+            subject: { type: "string" },
+            body: { type: "string" },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { to, subject, body } = request.body as { to: string; subject: string; body: string };
+      await sendAdminEmail({ to, subject, body });
       reply.code(204).send();
     },
   );

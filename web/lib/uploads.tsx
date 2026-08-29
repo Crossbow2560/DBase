@@ -22,7 +22,43 @@ import { queryKeys } from "./query-keys";
 const CHUNK_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 const STORAGE_KEY_PREFIX = "dbase:upload-session:";
 
-export type UploadStatus = "uploading" | "paused" | "error" | "complete" | "canceled";
+// A drag-and-drop of a whole folder can hand us dozens of files at once. Firing every one's
+// init + parts + complete immediately buries the backend's per-user write-rate limit
+// (APPLICATION_DESIGN.md §4.7 — 60 write requests/min) and turns a genuine bulk upload into a
+// wall of 429s. Cap how many run at once and queue the rest; combined with
+// fetchWithRateLimitRetry() below (which honors the server's Retry-After on the 429s that still
+// slip through), an 87-file drop drains as a steady trickle instead of a burst.
+const MAX_CONCURRENT_UPLOADS = 3;
+const RATE_LIMIT_MAX_RETRIES = 5;
+const RATE_LIMIT_FALLBACK_DELAY_MS = 5000;
+
+export type UploadStatus = "queued" | "uploading" | "paused" | "error" | "complete" | "canceled";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Retries a request when the backend replies 429 RATE_LIMITED, waiting the server-specified
+// Retry-After (plus a little jitter so a batch of queued uploads doesn't retry in lockstep)
+// before trying again. Any other response — ok or not — is handed back to the caller untouched.
+// Stops early once `shouldAbort()` turns true (the task was paused or canceled mid-wait).
+async function fetchWithRateLimitRetry(
+  input: string,
+  init: RequestInit,
+  shouldAbort: () => boolean,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetch(input, init);
+    if (res.status !== 429 || attempt >= RATE_LIMIT_MAX_RETRIES || shouldAbort()) {
+      return res;
+    }
+    const retryAfterSeconds = Number(res.headers.get("Retry-After"));
+    const baseMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+      ? retryAfterSeconds * 1000
+      : RATE_LIMIT_FALLBACK_DELAY_MS;
+    await delay(baseMs + Math.random() * 1000);
+  }
+}
 
 export interface UploadTask {
   id: string;
@@ -63,6 +99,9 @@ async function abortSessionOnServer(uploadSessionId: string) {
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [uploads, setUploads] = React.useState<UploadTask[]>([]);
   const internalRef = React.useRef<Map<string, InternalTaskState>>(new Map());
+  // Task ids waiting for a concurrency slot, and how many loops are running right now.
+  const queueRef = React.useRef<string[]>([]);
+  const activeCountRef = React.useRef(0);
   const queryClient = useQueryClient();
 
   function updateTask(id: string, patch: Partial<UploadTask>) {
@@ -79,16 +118,25 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // Init the session on first run.
       if (!internal.uploadSessionId) {
         const totalParts = Math.max(1, Math.ceil(internal.file.size / CHUNK_SIZE_BYTES));
-        const res = await fetch("/api/v1/files", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            targetFolderId: internal.task.folderId,
-            targetName: internal.file.name,
-            totalParts,
-          }),
-        });
+        const res = await fetchWithRateLimitRetry(
+          "/api/v1/files",
+          {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              targetFolderId: internal.task.folderId,
+              targetName: internal.file.name,
+              totalParts,
+            }),
+          },
+          () => internal.pauseRequested,
+        );
+        if (internal.pauseRequested) {
+          // cancel() also sets pauseRequested; don't overwrite the "canceled" it left behind.
+          if (internal.task.status !== "canceled") updateTask(id, { status: "paused" });
+          return;
+        }
         if (!res.ok) {
           const body = await res.json().catch(() => null);
           throw new ApiError(res.status, body?.error?.code ?? "INTERNAL_ERROR", body?.error?.message ?? "Could not start upload.");
@@ -100,7 +148,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
       while (internal.nextPartNumber * CHUNK_SIZE_BYTES < internal.file.size || internal.nextPartNumber === 0) {
         if (internal.pauseRequested) {
-          updateTask(id, { status: "paused" });
+          // cancel() also sets pauseRequested; don't overwrite the "canceled" it left behind.
+          if (internal.task.status !== "canceled") updateTask(id, { status: "paused" });
           return;
         }
 
@@ -108,7 +157,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         const end = Math.min(start + CHUNK_SIZE_BYTES, internal.file.size);
         const chunk = internal.file.slice(start, end);
 
-        const res = await fetch(
+        const res = await fetchWithRateLimitRetry(
           `/api/v1/files/upload-sessions/${internal.uploadSessionId}/parts/${internal.nextPartNumber}`,
           {
             method: "PUT",
@@ -119,7 +168,13 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             headers: { "Content-Type": "application/octet-stream" },
             body: chunk,
           },
+          () => internal.pauseRequested,
         );
+        if (internal.pauseRequested) {
+          // cancel() also sets pauseRequested; don't overwrite the "canceled" it left behind.
+          if (internal.task.status !== "canceled") updateTask(id, { status: "paused" });
+          return;
+        }
         if (!res.ok) {
           const body = await res.json().catch(() => null);
           throw new ApiError(res.status, body?.error?.code ?? "INTERNAL_ERROR", body?.error?.message ?? "Upload failed.");
@@ -131,12 +186,16 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         if (end >= internal.file.size) break;
       }
 
-      const completeRes = await fetch(`/api/v1/files/upload-sessions/${internal.uploadSessionId}/complete`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mimeType: internal.file.type || "application/octet-stream" }),
-      });
+      const completeRes = await fetchWithRateLimitRetry(
+        `/api/v1/files/upload-sessions/${internal.uploadSessionId}/complete`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mimeType: internal.file.type || "application/octet-stream" }),
+        },
+        () => internal.pauseRequested,
+      );
       if (!completeRes.ok) {
         const body = await completeRes.json().catch(() => null);
         throw new ApiError(completeRes.status, body?.error?.code ?? "INTERNAL_ERROR", body?.error?.message ?? "Could not finalize upload.");
@@ -168,6 +227,28 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  // Pulls queued tasks into runUploadLoop() up to MAX_CONCURRENT_UPLOADS at a time; each loop
+  // frees its slot and re-pumps when it settles (complete, error, or paused).
+  function pump() {
+    while (activeCountRef.current < MAX_CONCURRENT_UPLOADS && queueRef.current.length > 0) {
+      const id = queueRef.current.shift()!;
+      const internal = internalRef.current.get(id);
+      if (!internal || internal.pauseRequested || internal.task.status !== "queued") continue;
+      activeCountRef.current += 1;
+      updateTask(id, { status: "uploading" });
+      void runUploadLoop(id).finally(() => {
+        activeCountRef.current -= 1;
+        pump();
+      });
+    }
+  }
+
+  function enqueue(id: string) {
+    updateTask(id, { status: "queued" });
+    queueRef.current.push(id);
+    pump();
+  }
+
   function startUpload(file: File, folderId: string | null) {
     const id = crypto.randomUUID();
     const task: UploadTask = {
@@ -176,11 +257,11 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       folderId,
       totalBytes: file.size,
       uploadedBytes: 0,
-      status: "uploading",
+      status: "queued",
     };
     internalRef.current.set(id, { task, file, uploadSessionId: null, nextPartNumber: 0, pauseRequested: false });
     setUploads((prev) => [...prev, task]);
-    void runUploadLoop(id);
+    enqueue(id);
   }
 
   function pause(id: string) {
@@ -192,8 +273,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     const internal = internalRef.current.get(id);
     if (!internal) return;
     internal.pauseRequested = false;
-    updateTask(id, { status: "uploading" });
-    void runUploadLoop(id);
+    enqueue(id);
   }
 
   async function cancel(id: string) {
