@@ -70,6 +70,11 @@ interface CurrentFolder {
   parentFolderId: string | null;
 }
 
+interface AncestorFolder {
+  id: string;
+  name: string;
+}
+
 // "Files" is the catch-all for everything that isn't image/video/audio (documents, archives,
 // code, anything with no more specific mime prefix) — matches the wording of the type-filter
 // dropdown below rather than calling it "documents", since plenty of files in here won't be.
@@ -164,7 +169,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.folderContents(folderId),
     queryFn: () =>
-      api.get<{ folder: CurrentFolder | null; items: FolderContentsItem[] }>(
+      api.get<{ folder: CurrentFolder | null; ancestors?: AncestorFolder[]; items: FolderContentsItem[] }>(
         folderId ? `/folders/${folderId}/contents` : "/folders/contents",
       ),
   });
@@ -400,6 +405,14 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
           <Link href="/folders" className="hover:text-foreground">
             My Files
           </Link>
+          {data?.ancestors?.map((ancestor) => (
+            <React.Fragment key={ancestor.id}>
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+              <Link href={`/folders/${ancestor.id}`} className="hover:text-foreground">
+                {ancestor.name}
+              </Link>
+            </React.Fragment>
+          ))}
           {data?.folder && (
             <>
               <ChevronRight className="h-3.5 w-3.5" aria-hidden />

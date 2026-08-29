@@ -58,6 +58,8 @@ export async function getFolderContents(userId: string, folderId: string | null)
     const folder = await db.folders.findFirst({ where: { id: folderId, deleted_at: null } });
     if (!folder) throw folderNotFound();
 
+    const ancestors = await getAncestorChain(folder.materialized_path);
+
     // Not owner_id-scoped: DESIGN.md's "folder sharing is dynamic" means everything currently
     // inside an authorized folder is visible, regardless of who owns each individual child —
     // access to the PARENT is what was just checked; the children inherit it structurally.
@@ -79,6 +81,7 @@ export async function getFolderContents(userId: string, folderId: string | null)
     ]);
     return {
       folder: { id: folder.id, name: folder.name, parentFolderId: folder.parent_folder_id },
+      ancestors,
       items: serializeItems(folders, files, sizes, fileCounts),
     };
   }
@@ -103,6 +106,28 @@ export async function getFolderContents(userId: string, folderId: string | null)
     getRecursiveFolderFileCounts(folders.map((f) => f.id)),
   ]);
   return { folder: null, items: serializeItems(folders, files, sizes, fileCounts) };
+}
+
+/**
+ * The frontend's breadcrumb (folder-browser.tsx) used to only ever render Home / My Files /
+ * <current folder> — every ancestor in between was silently skipped, so a folder nested more than
+ * one level deep had no way to jump back to its actual parent, only all the way to the root.
+ * materialized_path already encodes the full root-to-self id chain (see createFolder above for
+ * how it's built: "/<ancestor id>/.../<this folder's own id>/"), so the chain to show is just that
+ * path's segments minus the folder's own id at the end — one query to resolve those ids to names,
+ * in path order (not whatever order the DB happens to return rows in).
+ */
+async function getAncestorChain(materializedPath: string): Promise<{ id: string; name: string }[]> {
+  const segments = materializedPath.split("/").filter(Boolean);
+  const ancestorIds = segments.slice(0, -1);
+  if (ancestorIds.length === 0) return [];
+
+  const rows = await db.folders.findMany({
+    where: { id: { in: ancestorIds } },
+    select: { id: true, name: true },
+  });
+  const nameById = new Map(rows.map((r) => [r.id, r.name]));
+  return ancestorIds.map((id) => ({ id, name: nameById.get(id) ?? "" })).filter((a) => a.name !== "");
 }
 
 /**
