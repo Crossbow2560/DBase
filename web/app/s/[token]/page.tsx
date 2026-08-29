@@ -17,12 +17,14 @@ import * as React from "react";
 import { use, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Download, Folder, FileText, List, LayoutGrid, X } from "lucide-react";
+import { ArrowLeft, ArrowUpDown, Download, Filter, Folder, FileText, List, LayoutGrid, SearchIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatDate } from "@/lib/format";
+import { fileCategory } from "@/lib/file-category";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SelectMenu } from "@/components/ui/select-menu";
 import { RowActionsMenu, type RowAction } from "@/components/files/row-actions-menu";
 
 interface SharedItem {
@@ -167,6 +169,16 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
   const [submittedPassword, setSubmittedPassword] = React.useState<string | undefined>(undefined);
   const [view, setView] = React.useState<"list" | "grid">("list");
   const [previewItem, setPreviewItem] = React.useState<SharedItem | null>(null);
+  // Same client-side search/filter/sort as the authenticated folder browser (folder-browser.tsx)
+  // — a visitor here has no account and no server-side search endpoint available to them, so this
+  // filters whatever's already loaded for the current folder rather than hitting the backend.
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [typeFilter, setTypeFilter] = React.useState<
+    "all" | "folder" | "image" | "video" | "audio" | "document"
+  >("all");
+  const [sortKey, setSortKey] = React.useState<
+    "name-asc" | "name-desc" | "size-desc" | "size-asc" | "modified-desc" | "modified-asc"
+  >("name-asc");
 
   const { data, error, isLoading } = useQuery({
     queryKey: ["public-share-link", token, submittedPassword, folderId],
@@ -180,6 +192,44 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
   });
 
   const needsPassword = error instanceof ApiError && error.status === 401;
+
+  React.useEffect(() => {
+    setSearchQuery("");
+  }, [folderId]);
+
+  const filteredItems = React.useMemo(() => {
+    if (!data) return [];
+    const q = searchQuery.trim().toLowerCase();
+    const matches = data.items.filter((item) => {
+      if (q && !item.name.toLowerCase().includes(q)) return false;
+      if (typeFilter === "folder") return item.type === "folder";
+      if (typeFilter !== "all") {
+        if (item.type !== "file") return false;
+        return fileCategory(item.mimeType) === typeFilter;
+      }
+      return true;
+    });
+
+    return [...matches].sort((a, b) => {
+      if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+      switch (sortKey) {
+        case "name-asc":
+          return a.name.localeCompare(b.name);
+        case "name-desc":
+          return b.name.localeCompare(a.name);
+        case "size-asc":
+          return Number(a.sizeBytes ?? 0) - Number(b.sizeBytes ?? 0);
+        case "size-desc":
+          return Number(b.sizeBytes ?? 0) - Number(a.sizeBytes ?? 0);
+        case "modified-asc":
+          return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+        case "modified-desc":
+          return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+        default:
+          return 0;
+      }
+    });
+  }, [data, searchQuery, typeFilter, sortKey]);
 
   function openFolder(id: string) {
     router.push(`?folder=${id}`);
@@ -258,38 +308,88 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
           <h1 className="text-xl font-semibold">{data?.name}</h1>
         </div>
         {data && data.items.length > 0 && (
-          <div className="flex items-center rounded-md border border-border p-0.5">
-            <button
-              type="button"
-              onClick={() => setView("list")}
-              aria-label="List view"
-              aria-pressed={view === "list"}
-              className={cn(
-                "rounded px-2 py-1.5 text-muted-foreground hover:text-foreground",
-                view === "list" && "bg-muted text-foreground",
-              )}
-            >
-              <List className="h-4 w-4" aria-hidden />
-            </button>
-            <button
-              type="button"
-              onClick={() => setView("grid")}
-              aria-label="Grid view"
-              aria-pressed={view === "grid"}
-              className={cn(
-                "rounded px-2 py-1.5 text-muted-foreground hover:text-foreground",
-                view === "grid" && "bg-muted text-foreground",
-              )}
-            >
-              <LayoutGrid className="h-4 w-4" aria-hidden />
-            </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <SearchIcon
+                className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+                aria-hidden
+              />
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search…"
+                className="h-8 w-36 pl-8 text-sm sm:w-48"
+              />
+            </div>
+
+            <SelectMenu
+              value={typeFilter}
+              onChange={setTypeFilter}
+              icon={Filter}
+              ariaLabel="Filter by type"
+              options={[
+                { value: "all", label: "All items" },
+                { value: "folder", label: "Folders only" },
+                { value: "image", label: "Images" },
+                { value: "video", label: "Videos" },
+                { value: "audio", label: "Audio" },
+                { value: "document", label: "Files" },
+              ]}
+            />
+
+            <SelectMenu
+              value={sortKey}
+              onChange={setSortKey}
+              icon={ArrowUpDown}
+              ariaLabel="Sort by"
+              options={[
+                { value: "name-asc", label: "Name (A–Z)" },
+                { value: "name-desc", label: "Name (Z–A)" },
+                { value: "modified-desc", label: "Newest first" },
+                { value: "modified-asc", label: "Oldest first" },
+                { value: "size-desc", label: "Largest first" },
+                { value: "size-asc", label: "Smallest first" },
+              ]}
+            />
+
+            <div className="flex items-center rounded-md border border-border p-0.5">
+              <button
+                type="button"
+                onClick={() => setView("list")}
+                aria-label="List view"
+                aria-pressed={view === "list"}
+                className={cn(
+                  "rounded px-2 py-1.5 text-muted-foreground hover:text-foreground",
+                  view === "list" && "bg-muted text-foreground",
+                )}
+              >
+                <List className="h-4 w-4" aria-hidden />
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("grid")}
+                aria-label="Grid view"
+                aria-pressed={view === "grid"}
+                className={cn(
+                  "rounded px-2 py-1.5 text-muted-foreground hover:text-foreground",
+                  view === "grid" && "bg-muted text-foreground",
+                )}
+              >
+                <LayoutGrid className="h-4 w-4" aria-hidden />
+              </button>
+            </div>
           </div>
         )}
       </div>
 
       {data && data.items.length === 0 && <p className="text-sm text-muted-foreground">This folder is empty.</p>}
+      {data && data.items.length > 0 && filteredItems.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          {searchQuery.trim() ? <>No files or folders match &quot;{searchQuery}&quot;.</> : "Nothing matches the current filter."}
+        </p>
+      )}
 
-      {data && data.items.length > 0 && view === "list" && (
+      {filteredItems.length > 0 && view === "list" && (
         <div className="overflow-hidden rounded-lg border border-border">
           <table className="w-full text-sm">
             <thead>
@@ -301,7 +401,7 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {data.items.map((item) => (
+              {filteredItems.map((item) => (
                 <tr key={item.id} className="group hover:bg-muted/30">
                   <td className="px-4 py-2.5 align-middle">
                     <div className="flex items-center gap-2.5">
@@ -341,9 +441,9 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
         </div>
       )}
 
-      {data && data.items.length > 0 && view === "grid" && (
+      {filteredItems.length > 0 && view === "grid" && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-          {data.items.map((item) => (
+          {filteredItems.map((item) => (
             <div key={item.id} className="group relative flex flex-col rounded-lg border border-border hover:bg-muted/30">
               <div className="absolute right-1.5 top-1.5 z-10 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
                 <RowActionsMenu actions={actionsFor(item)} />

@@ -39,6 +39,7 @@ import { useViewPreference } from "@/lib/use-view-preference";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SelectMenu } from "@/components/ui/select-menu";
+import { fileCategory } from "@/lib/file-category";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { ShareModal } from "@/components/files/share-modal";
 import { RenameModal } from "@/components/files/rename-modal";
@@ -73,16 +74,6 @@ interface CurrentFolder {
 interface AncestorFolder {
   id: string;
   name: string;
-}
-
-// "Files" is the catch-all for everything that isn't image/video/audio (documents, archives,
-// code, anything with no more specific mime prefix) — matches the wording of the type-filter
-// dropdown below rather than calling it "documents", since plenty of files in here won't be.
-function fileCategory(mimeType: string | undefined): "image" | "video" | "audio" | "document" {
-  if (mimeType?.startsWith("image/")) return "image";
-  if (mimeType?.startsWith("video/")) return "video";
-  if (mimeType?.startsWith("audio/")) return "audio";
-  return "document";
 }
 
 export function FolderBrowser({ folderId }: { folderId: string | null }) {

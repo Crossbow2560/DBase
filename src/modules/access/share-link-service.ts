@@ -180,13 +180,18 @@ export async function getPublicFolderContents(token: string, password: string | 
   if (link.item_type === "file") {
     const file = await db.files.findFirst({ where: { id: link.item_id, deleted_at: null } });
     if (!file) throw shareLinkNotFound();
+    // Was always `items: []` here — a file-type link's own listing never actually included the
+    // file it shares, so the public page rendered "This folder is empty" no matter what, with
+    // nothing to click to preview or download. downloadFile/previewFile below were always correct
+    // (isWithinSharedScope already permits this exact file for a file-type link) — the listing
+    // just never surfaced it as something to click on in the first place.
     return {
       name: file.name,
       role: link.role,
       folderId: null,
       parentFolderId: null,
       isRoot: true,
-      items: [] as ReturnType<typeof serializePublicItems>,
+      items: serializePublicItems([], [file]),
     };
   }
 
