@@ -26,6 +26,9 @@ import {
   LayoutGrid,
   X,
   UploadCloud,
+  SearchIcon,
+  ArrowUpDown,
+  Filter,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
@@ -34,6 +37,7 @@ import { useUploads } from "@/lib/uploads";
 import { formatBytes, formatDate } from "@/lib/format";
 import { useViewPreference } from "@/lib/use-view-preference";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { ShareModal } from "@/components/files/share-modal";
 import { RenameModal } from "@/components/files/rename-modal";
@@ -74,6 +78,15 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   const [tagsItem, setTagsItem] = React.useState<FolderContentsItem | null>(null);
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const [view, setView] = useViewPreference();
+  // Scoped to whatever's already loaded for this folder — filters the current listing client-side
+  // rather than hitting the backend, unlike the standalone /search page which searches everything
+  // the user can access regardless of location. Intentionally different: this is "find something
+  // in here", not "find something anywhere".
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [typeFilter, setTypeFilter] = React.useState<"all" | "folder" | "file">("all");
+  const [sortKey, setSortKey] = React.useState<
+    "name-asc" | "name-desc" | "size-desc" | "size-asc" | "modified-desc" | "modified-asc"
+  >("name-asc");
   const [isDraggingOver, setIsDraggingOver] = React.useState(false);
   // dragenter/dragleave fire on every child element as the pointer crosses them, not just once
   // for the container — a plain boolean flips off mid-drag every time it passes over a row/table
@@ -146,7 +159,42 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   // unique, but the toolbar staying up across a navigation reads as broken, not just unlucky).
   React.useEffect(() => {
     setSelectedIds(new Set());
+    setSearchQuery("");
   }, [folderId]);
+
+  // Folders always sort ahead of files regardless of the chosen key (standard file-manager
+  // convention — Explorer/Finder both do this) — only the ordering *within* each group follows
+  // sortKey. Applied after the search/type filtering above, on whatever's left to show.
+  const filteredItems = React.useMemo(() => {
+    if (!data) return [];
+    const q = searchQuery.trim().toLowerCase();
+    const matches = data.items.filter((item) => {
+      if (q && !item.name.toLowerCase().includes(q)) return false;
+      if (typeFilter !== "all" && item.type !== typeFilter) return false;
+      return true;
+    });
+
+    const sorted = [...matches].sort((a, b) => {
+      if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+      switch (sortKey) {
+        case "name-asc":
+          return a.name.localeCompare(b.name);
+        case "name-desc":
+          return b.name.localeCompare(a.name);
+        case "size-asc":
+          return Number(a.sizeBytes ?? 0) - Number(b.sizeBytes ?? 0);
+        case "size-desc":
+          return Number(b.sizeBytes ?? 0) - Number(a.sizeBytes ?? 0);
+        case "modified-asc":
+          return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+        case "modified-desc":
+          return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+        default:
+          return 0;
+      }
+    });
+    return sorted;
+  }, [data, searchQuery, typeFilter, sortKey]);
 
   // Bulk-fetched once rather than a per-row query (same N+1 concern the thumbnail component
   // above already accepts per-row for a different reason) — favorites list is small and this
@@ -251,8 +299,10 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   }
 
   function toggleSelectAll() {
-    if (!data) return;
-    setSelectedIds((prev) => (prev.size === data.items.length ? new Set() : new Set(data.items.map((i) => i.id))));
+    if (filteredItems.length === 0) return;
+    setSelectedIds((prev) =>
+      prev.size === filteredItems.length ? new Set() : new Set(filteredItems.map((i) => i.id)),
+    );
   }
 
   function actionsFor(item: FolderContentsItem): RowAction[] {
@@ -336,7 +386,57 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
           )}
         </nav>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <SearchIcon
+              className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <Input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search in this folder…"
+              className="h-8 w-40 pl-8 text-sm sm:w-52"
+            />
+          </div>
+
+          <div className="relative">
+            <Filter
+              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)}
+              aria-label="Filter by type"
+              className="h-8 appearance-none rounded-md border border-border bg-background py-1 pl-7 pr-2 text-sm text-foreground hover:bg-muted"
+            >
+              <option value="all">All items</option>
+              <option value="folder">Folders only</option>
+              <option value="file">Files only</option>
+            </select>
+          </div>
+
+          <div className="relative">
+            <ArrowUpDown
+              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <select
+              value={sortKey}
+              onChange={(e) => setSortKey(e.target.value as typeof sortKey)}
+              aria-label="Sort by"
+              className="h-8 appearance-none rounded-md border border-border bg-background py-1 pl-7 pr-2 text-sm text-foreground hover:bg-muted"
+            >
+              <option value="name-asc">Name (A–Z)</option>
+              <option value="name-desc">Name (Z–A)</option>
+              <option value="modified-desc">Newest first</option>
+              <option value="modified-asc">Oldest first</option>
+              <option value="size-desc">Largest first</option>
+              <option value="size-asc">Smallest first</option>
+            </select>
+          </div>
+
           <div className="flex items-center rounded-md border border-border p-0.5">
             <button
               type="button"
@@ -418,8 +518,15 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
         </p>
       )}
       {data && data.items.length === 0 && <p className="text-sm text-muted-foreground">This folder is empty.</p>}
+      {data && data.items.length > 0 && filteredItems.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          {searchQuery.trim()
+            ? <>No files or folders match &quot;{searchQuery}&quot;.</>
+            : "Nothing matches the current filter."}
+        </p>
+      )}
 
-      {data && data.items.length > 0 && view === "list" && (
+      {filteredItems.length > 0 && view === "list" && (
         <div className="overflow-hidden rounded-lg border border-border">
           <table className="w-full text-sm">
             <thead>
@@ -428,7 +535,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                   <input
                     type="checkbox"
                     className="h-3.5 w-3.5 shrink-0 appearance-none rounded border border-muted-foreground/40 bg-background checked:border-accent checked:bg-accent"
-                    checked={selectedIds.size > 0 && selectedIds.size === data.items.length}
+                    checked={selectedIds.size > 0 && selectedIds.size === filteredItems.length}
                     onChange={toggleSelectAll}
                     aria-label="Select all"
                   />
@@ -441,7 +548,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {data.items.map((item) => {
+              {filteredItems.map((item) => {
                 const isSelected = selectedIds.has(item.id);
                 return (
                   <tr
@@ -525,9 +632,9 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
         </div>
       )}
 
-      {data && data.items.length > 0 && view === "grid" && (
+      {filteredItems.length > 0 && view === "grid" && (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-          {data.items.map((item) => {
+          {filteredItems.map((item) => {
             const isSelected = selectedIds.has(item.id);
             return (
             <div
