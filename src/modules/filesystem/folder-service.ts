@@ -73,10 +73,13 @@ export async function getFolderContents(userId: string, folderId: string | null)
         select: { id: true, name: true, size_bytes: true, mime_type: true, updated_at: true },
       }),
     ]);
-    const sizes = await getRecursiveFolderSizes(folders.map((f) => f.id));
+    const [sizes, fileCounts] = await Promise.all([
+      getRecursiveFolderSizes(folders.map((f) => f.id)),
+      getRecursiveFolderFileCounts(folders.map((f) => f.id)),
+    ]);
     return {
       folder: { id: folder.id, name: folder.name, parentFolderId: folder.parent_folder_id },
-      items: serializeItems(folders, files, sizes),
+      items: serializeItems(folders, files, sizes, fileCounts),
     };
   }
 
@@ -95,8 +98,11 @@ export async function getFolderContents(userId: string, folderId: string | null)
       select: { id: true, name: true, size_bytes: true, mime_type: true, updated_at: true },
     }),
   ]);
-  const sizes = await getRecursiveFolderSizes(folders.map((f) => f.id));
-  return { folder: null, items: serializeItems(folders, files, sizes) };
+  const [sizes, fileCounts] = await Promise.all([
+    getRecursiveFolderSizes(folders.map((f) => f.id)),
+    getRecursiveFolderFileCounts(folders.map((f) => f.id)),
+  ]);
+  return { folder: null, items: serializeItems(folders, files, sizes, fileCounts) };
 }
 
 /**
@@ -124,10 +130,34 @@ async function getRecursiveFolderSizes(folderIds: string[]): Promise<Map<string,
   return new Map(rows.map((r) => [r.folder_id, r.total]));
 }
 
+/**
+ * Same materialized_path-prefix approach as getRecursiveFolderSizes above, counting files
+ * instead of summing their size — the small "N files" hint shown under each folder row in the
+ * browser is a recursive total (everything nested inside, not just direct children), matching
+ * how the folder's size is already computed.
+ */
+async function getRecursiveFolderFileCounts(folderIds: string[]): Promise<Map<string, number>> {
+  if (folderIds.length === 0) return new Map();
+  const rows = await db.$queryRaw<{ folder_id: string; total: bigint }[]>`
+    SELECT child.id as folder_id, COUNT(f.id)::bigint as total
+    FROM folders child
+    LEFT JOIN folders descendant
+      ON descendant.materialized_path LIKE child.materialized_path || '%'
+      AND descendant.deleted_at IS NULL
+    LEFT JOIN files f
+      ON f.folder_id = descendant.id
+      AND f.deleted_at IS NULL
+    WHERE child.id = ANY(${folderIds}::uuid[])
+    GROUP BY child.id
+  `;
+  return new Map(rows.map((r) => [r.folder_id, Number(r.total)]));
+}
+
 function serializeItems(
   folders: { id: string; name: string; updated_at: Date }[],
   files: { id: string; name: string; size_bytes: bigint; mime_type: string; updated_at: Date }[],
   folderSizes: Map<string, bigint>,
+  folderFileCounts: Map<string, number>,
 ) {
   return [
     ...folders.map((f) => ({
@@ -135,6 +165,7 @@ function serializeItems(
       name: f.name,
       type: "folder" as const,
       sizeBytes: (folderSizes.get(f.id) ?? 0n).toString(),
+      fileCount: folderFileCounts.get(f.id) ?? 0,
       updatedAt: f.updated_at.toISOString(),
     })),
     ...files.map((f) => ({

@@ -49,6 +49,10 @@ interface FolderContentsItem {
   name: string;
   type: "file" | "folder";
   sizeBytes?: string;
+  // Only present on folders — a recursive count of every file nested inside (see
+  // getRecursiveFolderFileCounts in the backend's folder-service.ts), shown as a small hint
+  // under the folder's name so you don't have to open it to see roughly how much is in there.
+  fileCount?: number;
   updatedAt: string;
 }
 
@@ -471,9 +475,14 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                           <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                         )}
                         {item.type === "folder" ? (
-                          <Link href={`/folders/${item.id}`} className="font-medium hover:underline">
-                            {item.name}
-                          </Link>
+                          <>
+                            <Link href={`/folders/${item.id}`} className="font-medium hover:underline">
+                              {item.name}
+                            </Link>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {item.fileCount ?? 0} {item.fileCount === 1 ? "file" : "files"}
+                            </span>
+                          </>
                         ) : (
                           <button
                             type="button"
@@ -577,8 +586,13 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                 </button>
               )}
 
-              <div className="truncate rounded-b-lg border-t border-border px-2.5 py-2 text-center text-sm font-medium">
-                {item.name}
+              <div className="rounded-b-lg border-t border-border px-2.5 py-2 text-center">
+                <div className="truncate text-sm font-medium">{item.name}</div>
+                {item.type === "folder" && (
+                  <div className="text-xs text-muted-foreground">
+                    {item.fileCount ?? 0} {item.fileCount === 1 ? "file" : "files"}
+                  </div>
+                )}
               </div>
             </div>
             );

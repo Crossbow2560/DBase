@@ -153,7 +153,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             mobileNavOpen ? "translate-x-0" : "-translate-x-full",
           )}
         >
-          <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
             <div className="mb-[var(--sb-logo-mb)] flex shrink-0 items-center gap-2.5 px-1">
               <img
                 src="/logo.png"
