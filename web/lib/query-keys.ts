@@ -24,6 +24,7 @@ export const queryKeys = {
   adminActivity: () => ["admin", "activity"] as const,
   adminFailedJobs: () => ["admin", "failed-jobs"] as const,
   adminBackups: () => ["admin", "backups"] as const,
+  adminReceivedEmails: () => ["admin", "received-emails"] as const,
 } as const;
 
 /**

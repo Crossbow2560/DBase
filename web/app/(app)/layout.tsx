@@ -21,6 +21,7 @@ import {
   HardDrive,
   DatabaseBackup,
   Mail,
+  Inbox,
   Menu,
   type LucideIcon,
 } from "lucide-react";
@@ -92,6 +93,7 @@ const ADMIN_LINKS: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/admin/system-storage", label: "Storage Limit", icon: HardDrive },
   { href: "/admin/backup", label: "Backup", icon: DatabaseBackup },
   { href: "/admin/send-mail", label: "Send Mail", icon: Mail },
+  { href: "/admin/received-mail", label: "Received Mail", icon: Inbox },
 ];
 
 // FRONTEND_DESIGN.md §4.1: redirects TO /login if not authenticated. Same client-side-only

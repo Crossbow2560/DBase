@@ -44,6 +44,13 @@ export const config = {
     // verification emails or password-reset emails to actually reach anyone.
     resendApiKey: process.env.RESEND_API_KEY,
     from: process.env.EMAIL_FROM ?? "onboarding@resend.dev",
+
+    // Inbound mail (POST /api/v1/email/inbound). RESEND_WEBHOOK_SECRET is the Svix signing
+    // secret ("whsec_...") shown when you create the inbound webhook in the Resend dashboard —
+    // required for the endpoint to accept anything; left unset, every inbound POST is rejected
+    // 401 rather than trusted blindly. inboundAddress is only used to label the admin UI.
+    inboundWebhookSecret: process.env.RESEND_WEBHOOK_SECRET,
+    inboundAddress: process.env.EMAIL_INBOUND_ADDRESS ?? "dbase@nishit-db.com",
   },
 
   // DESIGN.md §3.5: an upload session not resumed within this window is abandoned and cleaned

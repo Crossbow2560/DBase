@@ -6,6 +6,7 @@ import * as admin from "./user-admin-service.js";
 import * as lifecycle from "../lifecycle/lifecycle-service.js";
 import * as backup from "./backup-service.js";
 import { sendAdminEmail } from "./notify-service.js";
+import { listReceivedEmails } from "../email/inbound-service.js";
 
 async function requireSession(request: FastifyRequest) {
   const rawToken = request.cookies[config.sessionCookieName];
@@ -178,6 +179,11 @@ export async function adminRoutes(app: FastifyInstance) {
       reply.code(204).send();
     },
   );
+
+  app.get("/api/v1/admin/received-emails", { preHandler: requireAdmin }, async (_request, reply) => {
+    const emails = await listReceivedEmails();
+    reply.send({ emails, inboundAddress: config.email.inboundAddress });
+  });
 
   app.get("/api/v1/admin/activity", { preHandler: requireAdmin }, async (_request, reply) => {
     const entries = await admin.listActivity();

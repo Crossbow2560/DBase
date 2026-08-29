@@ -10,6 +10,7 @@ import { accessRoutes } from "./modules/access/routes.js";
 import { trashRoutes } from "./modules/trash/routes.js";
 import { organizeRoutes } from "./modules/organize/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
+import { emailRoutes } from "./modules/email/routes.js";
 import { searchRoutes } from "./modules/search/routes.js";
 import { startUploadSessionCleanupWorker } from "./workers/upload-session-cleanup.js";
 import { startDeletionQueueWorker } from "./workers/deletion-queue.js";
@@ -89,6 +90,7 @@ await app.register(accessRoutes);
 await app.register(trashRoutes);
 await app.register(organizeRoutes);
 await app.register(adminRoutes);
+await app.register(emailRoutes);
 await app.register(searchRoutes);
 
 app.get("/health", async () => ({ status: "ok" }));
