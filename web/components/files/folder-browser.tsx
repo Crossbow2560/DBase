@@ -38,6 +38,7 @@ import { formatBytes, formatDate } from "@/lib/format";
 import { useViewPreference } from "@/lib/use-view-preference";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SelectMenu } from "@/components/ui/select-menu";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { ShareModal } from "@/components/files/share-modal";
 import { RenameModal } from "@/components/files/rename-modal";
@@ -57,6 +58,9 @@ interface FolderContentsItem {
   // getRecursiveFolderFileCounts in the backend's folder-service.ts), shown as a small hint
   // under the folder's name so you don't have to open it to see roughly how much is in there.
   fileCount?: number;
+  // Only present on files (backend's serializeItems in folder-service.ts) — used for the
+  // Images/Videos/Audio/Files type filter below, matched by prefix.
+  mimeType?: string;
   updatedAt: string;
 }
 
@@ -64,6 +68,16 @@ interface CurrentFolder {
   id: string;
   name: string;
   parentFolderId: string | null;
+}
+
+// "Files" is the catch-all for everything that isn't image/video/audio (documents, archives,
+// code, anything with no more specific mime prefix) — matches the wording of the type-filter
+// dropdown below rather than calling it "documents", since plenty of files in here won't be.
+function fileCategory(mimeType: string | undefined): "image" | "video" | "audio" | "document" {
+  if (mimeType?.startsWith("image/")) return "image";
+  if (mimeType?.startsWith("video/")) return "video";
+  if (mimeType?.startsWith("audio/")) return "audio";
+  return "document";
 }
 
 export function FolderBrowser({ folderId }: { folderId: string | null }) {
@@ -83,7 +97,9 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   // the user can access regardless of location. Intentionally different: this is "find something
   // in here", not "find something anywhere".
   const [searchQuery, setSearchQuery] = React.useState("");
-  const [typeFilter, setTypeFilter] = React.useState<"all" | "folder" | "file">("all");
+  const [typeFilter, setTypeFilter] = React.useState<
+    "all" | "folder" | "image" | "video" | "audio" | "document"
+  >("all");
   const [sortKey, setSortKey] = React.useState<
     "name-asc" | "name-desc" | "size-desc" | "size-asc" | "modified-desc" | "modified-asc"
   >("name-asc");
@@ -170,7 +186,13 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
     const q = searchQuery.trim().toLowerCase();
     const matches = data.items.filter((item) => {
       if (q && !item.name.toLowerCase().includes(q)) return false;
-      if (typeFilter !== "all" && item.type !== typeFilter) return false;
+      if (typeFilter === "folder") return item.type === "folder";
+      if (typeFilter !== "all") {
+        // Images/Videos/Audio/Files are a breakdown of files only — folders never match a
+        // specific media-type filter, same as picking "Folders only" hides every file.
+        if (item.type !== "file") return false;
+        return fileCategory(item.mimeType) === typeFilter;
+      }
       return true;
     });
 
@@ -400,42 +422,35 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
             />
           </div>
 
-          <div className="relative">
-            <Filter
-              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-              aria-hidden
-            />
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)}
-              aria-label="Filter by type"
-              className="h-8 appearance-none rounded-md border border-border bg-background py-1 pl-7 pr-2 text-sm text-foreground hover:bg-muted"
-            >
-              <option value="all">All items</option>
-              <option value="folder">Folders only</option>
-              <option value="file">Files only</option>
-            </select>
-          </div>
+          <SelectMenu
+            value={typeFilter}
+            onChange={setTypeFilter}
+            icon={Filter}
+            ariaLabel="Filter by type"
+            options={[
+              { value: "all", label: "All items" },
+              { value: "folder", label: "Folders only" },
+              { value: "image", label: "Images" },
+              { value: "video", label: "Videos" },
+              { value: "audio", label: "Audio" },
+              { value: "document", label: "Files" },
+            ]}
+          />
 
-          <div className="relative">
-            <ArrowUpDown
-              className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-              aria-hidden
-            />
-            <select
-              value={sortKey}
-              onChange={(e) => setSortKey(e.target.value as typeof sortKey)}
-              aria-label="Sort by"
-              className="h-8 appearance-none rounded-md border border-border bg-background py-1 pl-7 pr-2 text-sm text-foreground hover:bg-muted"
-            >
-              <option value="name-asc">Name (A–Z)</option>
-              <option value="name-desc">Name (Z–A)</option>
-              <option value="modified-desc">Newest first</option>
-              <option value="modified-asc">Oldest first</option>
-              <option value="size-desc">Largest first</option>
-              <option value="size-asc">Smallest first</option>
-            </select>
-          </div>
+          <SelectMenu
+            value={sortKey}
+            onChange={setSortKey}
+            icon={ArrowUpDown}
+            ariaLabel="Sort by"
+            options={[
+              { value: "name-asc", label: "Name (A–Z)" },
+              { value: "name-desc", label: "Name (Z–A)" },
+              { value: "modified-desc", label: "Newest first" },
+              { value: "modified-asc", label: "Oldest first" },
+              { value: "size-desc", label: "Largest first" },
+              { value: "size-asc", label: "Smallest first" },
+            ]}
+          />
 
           <div className="flex items-center rounded-md border border-border p-0.5">
             <button
