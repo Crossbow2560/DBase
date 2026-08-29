@@ -248,14 +248,14 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
     if (tab) tab.location.href = url;
   }
 
-  function downloadFolderZip(item: SharedItem) {
+  function downloadFolderZip(folderId: string) {
     const qs = submittedPassword ? `?password=${encodeURIComponent(submittedPassword)}` : "";
-    window.open(`/api/v1/public/share-links/${token}/folders/${item.id}/download-zip${qs}`, "_blank");
+    window.open(`/api/v1/public/share-links/${token}/folders/${folderId}/download-zip${qs}`, "_blank");
   }
 
   function actionsFor(item: SharedItem): RowAction[] {
     return item.type === "folder"
-      ? [{ label: "Download as ZIP", icon: Download, onSelect: () => downloadFolderZip(item) }]
+      ? [{ label: "Download as ZIP", icon: Download, onSelect: () => downloadFolderZip(item.id) }]
       : [{ label: "Download", icon: Download, onSelect: () => downloadFile(item) }];
   }
 
@@ -307,8 +307,17 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
           )}
           <h1 className="text-xl font-semibold">{data?.name}</h1>
         </div>
-        {data && data.items.length > 0 && (
+        {data && (data.folderId || data.items.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
+            {data.folderId && (
+              <Button variant="outline" size="sm" onClick={() => downloadFolderZip(data.folderId!)}>
+                <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                Download as ZIP
+              </Button>
+            )}
+
+            {data.items.length > 0 && (
+              <>
             <div className="relative">
               <SearchIcon
                 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
@@ -378,6 +387,8 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
                 <LayoutGrid className="h-4 w-4" aria-hidden />
               </button>
             </div>
+              </>
+            )}
           </div>
         )}
       </div>
