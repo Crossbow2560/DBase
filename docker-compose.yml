@@ -7,6 +7,14 @@ services:
       # Both sides driven by the same var (root .env's PORT) — change it if 3000 is already taken
       # on this machine by something else. See .env.example.
       - "${PORT:-3000}:${PORT:-3000}"
+    # Every key in the root .env is passed straight through to the backend process. Compose's own
+    # `.env` auto-load only does `${VAR}` substitution *into this file* — it does NOT put anything
+    # inside the container; that needs env_file (whole file) or environment (named vars). With this
+    # here, a new backend env var (e.g. RESEND_WEBHOOK_SECRET) just needs a line in .env — no edit
+    # to this file. The `environment:` block below still wins for the few keys it remaps or
+    # defaults (MINIO_ACCESS_KEY <- MINIO_ROOT_USER, etc.).
+    env_file:
+      - .env
     environment:
       DATABASE_URL: ${DATABASE_URL}
       # Not read by the running server itself — only by scripts/migrate.ts (npm run migrate) as a
@@ -29,12 +37,8 @@ services:
       # end-to-end without real email infra configured. Set both to actually send email.
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-onboarding@resend.dev}
-      # Inbound mail (POST /api/v1/email/inbound, src/modules/email/routes.ts). Unset by default —
-      # the endpoint rejects every request with 401 INBOUND_NOT_CONFIGURED until the Svix signing
-      # secret ("whsec_...") from the Resend inbound webhook is set here. Compose only forwards
-      # vars a service's `environment:` explicitly names, so setting it in .env alone does nothing.
-      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
-      EMAIL_INBOUND_ADDRESS: ${EMAIL_INBOUND_ADDRESS:-dbase@nishit-db.com}
+      # RESEND_WEBHOOK_SECRET / EMAIL_INBOUND_ADDRESS (inbound mail, src/modules/email/routes.ts)
+      # are not listed here on purpose — they flow in through env_file above, straight from .env.
       PORT: ${PORT:-3000}
       # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
       # IMPLEMENTATION_PHASES.md Subcomponent 1) that will actually talk to MinIO isn't built.
