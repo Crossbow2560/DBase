@@ -56,10 +56,15 @@ async function main() {
       display_name: name,
       role: "admin",
       storage_quota_bytes: config.defaultUserQuotaBytes,
+      // Whoever runs this script already controls the deployment — there's no one to prove
+      // the email to, and login() refuses unverified accounts. Verifying is also what allocates
+      // the quota out of the system storage limit (supabase/migrations/0022).
+      email_verified: true,
     },
     update: {
       role: "admin",
       password_hash: passwordHash,
+      email_verified: true,
     },
   });
 
@@ -68,6 +73,13 @@ async function main() {
 
 main()
   .catch((err) => {
+    if (err instanceof Error && err.message.includes("SYSTEM_STORAGE_ALLOCATION_EXCEEDED")) {
+      console.error(
+        "Not enough unallocated system storage for the admin's quota — raise " +
+          "system_settings.total_storage_limit_bytes or lower DEFAULT_USER_QUOTA_BYTES.",
+      );
+      process.exit(1);
+    }
     console.error(err);
     process.exit(1);
   })
