@@ -1,5 +1,12 @@
 import { db } from "../../db.js";
-import { userNotFound, invalidQuota, lastAdminStanding, invalidStorageLimit } from "./errors.js";
+import {
+  userNotFound,
+  invalidQuota,
+  lastAdminStanding,
+  invalidStorageLimit,
+  quotaExceedsUnallocated,
+  storageLimitBelowAllocation,
+} from "./errors.js";
 import { logActivity, logAdminViewIfNewSession } from "./audit-service.js";
 
 function mapUserRow(user: {
@@ -33,7 +40,10 @@ export async function listUsers() {
 /**
  * REQUIREMENTS.md §5.6: only an admin can change a user's quota; 0 is valid, negative is not.
  * Reducing below current usage is explicitly allowed (existing files/data are untouched — this
- * only affects future uploads).
+ * only affects future uploads). Raising it is bounded by the system's unallocated space —
+ * quotas are pre-allocated out of the system-wide limit (supabase/migrations/
+ * 0022_preallocate_user_quotas.sql, which is the real enforcement; the catch below only turns
+ * its exception into a useful message).
  */
 export async function changeQuota(adminId: string, targetUserId: string, quotaBytes: number): Promise<void> {
   if (!Number.isInteger(quotaBytes) || quotaBytes < 0) throw invalidQuota();
@@ -41,7 +51,16 @@ export async function changeQuota(adminId: string, targetUserId: string, quotaBy
   const user = await db.users.findUnique({ where: { id: targetUserId } });
   if (!user) throw userNotFound();
 
-  await db.users.update({ where: { id: targetUserId }, data: { storage_quota_bytes: BigInt(quotaBytes) } });
+  try {
+    await db.users.update({ where: { id: targetUserId }, data: { storage_quota_bytes: BigInt(quotaBytes) } });
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("SYSTEM_STORAGE_ALLOCATION_EXCEEDED")) {
+      const { limit, allocated } = await getAllocation();
+      const available = limit - (user.email_verified ? allocated - user.storage_quota_bytes : allocated);
+      throw quotaExceedsUnallocated(available > 0n ? available : 0n);
+    }
+    throw err;
+  }
 
   await logActivity({
     actorId: adminId,
@@ -104,28 +123,49 @@ export async function getSystemStats() {
  * next to the limit it's editing.
  */
 export async function getSystemStorageSettings() {
-  const [settings, usage] = await Promise.all([
+  const [settings, usage, allocation] = await Promise.all([
     db.system_settings.findUniqueOrThrow({ where: { id: true } }),
     db.users.aggregate({ _sum: { storage_used_bytes: true } }),
+    db.users.aggregate({ where: { email_verified: true }, _sum: { storage_quota_bytes: true } }),
   ]);
   return {
     totalStorageLimitBytes: Number(settings.total_storage_limit_bytes),
     totalStorageUsedBytes: Number(usage._sum.storage_used_bytes ?? 0n),
+    // SUM of every verified account's quota — pre-allocated out of the limit (0022), so this is
+    // what actually decides whether a new account can register or a quota can be raised.
+    // Unverified sign-ups don't hold an allocation until they verify.
+    totalStorageAllocatedBytes: Number(allocation._sum.storage_quota_bytes ?? 0n),
   };
+}
+
+async function getAllocation() {
+  const [settings, usage] = await Promise.all([
+    db.system_settings.findUniqueOrThrow({ where: { id: true } }),
+    db.users.aggregate({ where: { email_verified: true }, _sum: { storage_quota_bytes: true } }),
+  ]);
+  return { limit: settings.total_storage_limit_bytes, allocated: usage._sum.storage_quota_bytes ?? 0n };
 }
 
 /**
  * REQUIREMENTS.md §5.6-equivalent for the system-wide cap: only an admin can change it. Same
  * "lowering below current usage is allowed" philosophy as changeQuota() above — it only affects
- * future uploads, not existing data, so there's nothing to guard against here beyond basic
- * input validation. The real enforcement is still the DB trigger (0015), not this function; this
- * just writes the one row it reads.
+ * future uploads, not existing data. It can't go below the total already allocated to user
+ * quotas, though (0022's trigger enforces that; this just maps its exception). The real
+ * enforcement is still the DB triggers (0015, 0022), not this function.
  */
 export async function setSystemStorageLimit(adminId: string, limitBytes: number): Promise<void> {
   if (!Number.isInteger(limitBytes) || limitBytes < 0) throw invalidStorageLimit();
 
   const previous = await db.system_settings.findUniqueOrThrow({ where: { id: true } });
-  await db.system_settings.update({ where: { id: true }, data: { total_storage_limit_bytes: BigInt(limitBytes) } });
+  try {
+    await db.system_settings.update({ where: { id: true }, data: { total_storage_limit_bytes: BigInt(limitBytes) } });
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("STORAGE_LIMIT_BELOW_ALLOCATION")) {
+      const { allocated } = await getAllocation();
+      throw storageLimitBelowAllocation(allocated);
+    }
+    throw err;
+  }
 
   await logActivity({
     actorId: adminId,

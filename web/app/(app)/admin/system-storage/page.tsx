@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 interface SystemStorageSettings {
   totalStorageLimitBytes: number;
   totalStorageUsedBytes: number;
+  totalStorageAllocatedBytes: number;
 }
 
 export default function AdminSystemStoragePage() {
@@ -60,6 +61,11 @@ export default function AdminSystemStoragePage() {
 
   const usedGb = data ? data.totalStorageUsedBytes / 1e9 : 0;
   const limitGbCurrent = data ? data.totalStorageLimitBytes / 1e9 : 0;
+  const allocatedGb = data ? data.totalStorageAllocatedBytes / 1e9 : 0;
+  const unallocatedGb = Math.max(0, limitGbCurrent - allocatedGb);
+  const allocatedPercent = data && data.totalStorageLimitBytes > 0
+    ? Math.min(100, Math.round((data.totalStorageAllocatedBytes / data.totalStorageLimitBytes) * 100))
+    : 0;
   const percent = data && data.totalStorageLimitBytes > 0
     ? Math.min(100, Math.round((data.totalStorageUsedBytes / data.totalStorageLimitBytes) * 100))
     : 0;
@@ -70,8 +76,10 @@ export default function AdminSystemStoragePage() {
         <h1 className="text-xl font-semibold">System storage limit</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           A hard cap on total storage across every account combined. Enforced at the database
-          level, not just here — no upload anywhere in the system can push total usage past this
-          number.
+          level, not just here. A user&apos;s quota is pre-allocated out of this limit once they
+          verify their email: verified quotas can never total more than it, and new registrations
+          are refused once there isn&apos;t enough unallocated space left for another
+          account&apos;s default quota.
         </p>
       </div>
 
@@ -92,6 +100,18 @@ export default function AdminSystemStoragePage() {
           <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
             <span>{usedGb.toFixed(2)} GB used</span>
             <span>{limitGbCurrent.toFixed(0)} GB limit ({percent}%)</span>
+          </div>
+
+          <div className="mb-2 mt-4 text-sm font-medium text-muted-foreground">Allocated to verified users&apos; quotas</div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className={`h-full ${allocatedPercent >= 100 ? "bg-destructive" : "bg-accent"}`}
+              style={{ width: `${allocatedPercent}%` }}
+            />
+          </div>
+          <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
+            <span>{allocatedGb.toFixed(2)} GB allocated ({allocatedPercent}%)</span>
+            <span>{unallocatedGb.toFixed(2)} GB unallocated</span>
           </div>
         </div>
       )}

@@ -38,3 +38,24 @@ export const emailNotVerified = () =>
 
 export const invalidVerificationToken = () =>
   new AppError(400, "INVALID_VERIFICATION_TOKEN", "This verification link is invalid or has expired.");
+
+// Not folded into registrationFailed() — this says nothing about whether any particular email
+// exists, so there's no enumeration concern, and the registrant deserves to know retrying won't
+// help. Raised when supabase/migrations/0022_preallocate_user_quotas.sql's trigger rejects the
+// new row because the system's storage is already fully allocated to existing accounts.
+export const registrationClosed = () =>
+  new AppError(
+    403,
+    "REGISTRATION_CLOSED",
+    "Registration is closed: this system's storage capacity is fully allocated. Contact an admin.",
+  );
+
+// Verification is when the account's quota is actually allocated (0022) — only verified accounts
+// hold space, so it can have run out between registering and clicking the link. The token is
+// left unused, so the same link works once an admin frees up or adds space.
+export const verificationStorageFull = () =>
+  new AppError(
+    409,
+    "SYSTEM_STORAGE_ALLOCATION_EXCEEDED",
+    "Your email can't be verified right now: this system's storage capacity is fully allocated. Contact an admin, then try this link again.",
+  );

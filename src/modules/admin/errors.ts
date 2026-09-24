@@ -13,3 +13,23 @@ export const invalidStorageLimit = () =>
 
 export const backupNotFound = () =>
   new AppError(404, "NOT_FOUND", "That backup no longer exists — it may have been deleted directly in MinIO.");
+
+// supabase/migrations/0022_preallocate_user_quotas.sql: quotas are pre-allocated out of the
+// system-wide limit, so SUM(quotas) can never exceed it.
+export const quotaExceedsUnallocated = (availableBytes: bigint) =>
+  new AppError(
+    409,
+    "SYSTEM_STORAGE_ALLOCATION_EXCEEDED",
+    `Not enough unallocated system storage for this quota — at most ${formatGb(availableBytes)} GB can be given to this user. Raise the system storage limit or lower other users' quotas first.`,
+  );
+
+export const storageLimitBelowAllocation = (allocatedBytes: bigint) =>
+  new AppError(
+    409,
+    "STORAGE_LIMIT_BELOW_ALLOCATION",
+    `The system limit can't be lower than the ${formatGb(allocatedBytes)} GB already allocated to user quotas. Lower user quotas first.`,
+  );
+
+function formatGb(bytes: bigint): string {
+  return (Number(bytes) / 1e9).toFixed(2);
+}

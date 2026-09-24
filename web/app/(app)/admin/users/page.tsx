@@ -35,6 +35,8 @@ export default function AdminUsersPage() {
 
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: queryKeys.adminUsers() });
+    // Quota changes and deletions move the system-wide allocated total (0022 pre-allocation).
+    queryClient.invalidateQueries({ queryKey: queryKeys.adminSystemStorage() });
   }
 
   async function toggleActive(userRow: AdminUserRow) {

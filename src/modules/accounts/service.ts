@@ -15,6 +15,8 @@ import {
   userNotFoundByEmail,
   emailNotVerified,
   invalidVerificationToken,
+  registrationClosed,
+  verificationStorageFull,
 } from "./errors.js";
 
 const POSTGRES_UNIQUE_VIOLATION = "P2002";
@@ -76,7 +78,15 @@ export async function register(input: {
       select: { id: true, email: true, display_name: true, created_at: true },
     });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === POSTGRES_UNIQUE_VIOLATION) {
+    // supabase/migrations/0022_preallocate_user_quotas.sql: the insert is refused once verified
+    // accounts' quotas leave too little unallocated space for this one's (it's only actually
+    // allocated at verification, see verifyEmail()). That BEFORE INSERT trigger fires ahead of the unique
+    // check, so an unverified retry (below) can surface as this error too — it's routed through
+    // the same existing-row lookup, since updating that row in place allocates nothing new.
+    const allocationExceeded = err instanceof Error && err.message.includes("SYSTEM_STORAGE_ALLOCATION_EXCEEDED");
+    const uniqueViolation =
+      err instanceof Prisma.PrismaClientKnownRequestError && err.code === POSTGRES_UNIQUE_VIOLATION;
+    if (allocationExceeded || uniqueViolation) {
       // Real bug, reported directly: an account that never got past verification (email
       // provider hiccup, the registrant mistyped and never received the link, they just
       // abandoned the tab) permanently squatted its own email address — every retry hit this
@@ -90,8 +100,10 @@ export async function register(input: {
       // email_verified is a genuine duplicate.
       const existing = await db.users.findUnique({ where: { email: input.email } });
       if (!existing || existing.email_verified) {
-        // Non-enumerating: same generic error as any other registration failure.
-        throw registrationFailed();
+        // Non-enumerating: when the system is full every non-retry attempt gets the same
+        // "closed" error regardless of the email; otherwise the same generic error as any other
+        // registration failure.
+        throw allocationExceeded ? registrationClosed() : registrationFailed();
       }
       user = await db.users.update({
         where: { id: existing.id },
@@ -215,10 +227,18 @@ export async function verifyEmail(rawToken: string): Promise<void> {
     throw invalidVerificationToken();
   }
 
-  await db.$transaction([
-    db.users.update({ where: { id: tokenRow.user_id }, data: { email_verified: true } }),
-    db.email_verification_tokens.update({ where: { id: tokenRow.id }, data: { used_at: new Date() } }),
-  ]);
+  try {
+    await db.$transaction([
+      db.users.update({ where: { id: tokenRow.user_id }, data: { email_verified: true } }),
+      db.email_verification_tokens.update({ where: { id: tokenRow.id }, data: { used_at: new Date() } }),
+    ]);
+  } catch (err) {
+    // supabase/migrations/0022_preallocate_user_quotas.sql allocates the quota at this point.
+    if (err instanceof Error && err.message.includes("SYSTEM_STORAGE_ALLOCATION_EXCEEDED")) {
+      throw verificationStorageFull();
+    }
+    throw err;
+  }
 }
 
 /** Non-enumerating, same as requestPasswordReset below — always behaves identically either way. */
