@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { db } from "../../db.js";
+import { resolveLocations } from "./locations.js";
 import * as storage from "../storage/client.js";
 import { normalizeName, assertPathLengthOk } from "./normalize.js";
 import { nameCollision, fileNotFound, folderNotFound, noLongerAvailable } from "./errors.js";
@@ -120,4 +121,58 @@ export async function getPreviewUrl(userId: string, fileId: string): Promise<{ u
 
   const url = await storage.getPresignedPreviewUrl(file.storage_key, file.mime_type);
   return { url, mimeType: file.mime_type };
+}
+
+const RECENT_FILES_MAX = 50;
+
+/**
+ * The home page's "Recent Files": the most recently added or changed files anywhere in the user's
+ * My Files tree — their own root-level files plus everything inside their own root-level folders,
+ * at any depth (the same scope as searching My Files, search-service.ts searchWithin "mine"). It
+ * used to be built client-side from the root folder's listing, so a file uploaded into any
+ * subfolder could never appear. Each file carries its location ("in Projects / Alpha").
+ */
+export async function listRecentFiles(userId: string, limit: number) {
+  const take = Math.min(Math.max(1, limit), RECENT_FILES_MAX);
+  const rows = await db.$queryRaw<
+    {
+      id: string;
+      name: string;
+      size_bytes: bigint;
+      mime_type: string;
+      created_at: Date;
+      updated_at: Date;
+      parent_id: string | null;
+      parent_path: string | null;
+    }[]
+  >`
+    WITH roots AS (
+      SELECT id::text AS id FROM folders
+      WHERE owner_id = ${userId}::uuid AND parent_folder_id IS NULL AND deleted_at IS NULL
+    )
+    SELECT fi.id, fi.name, fi.size_bytes, fi.mime_type, fi.created_at, fi.updated_at,
+           fi.folder_id AS parent_id, p.materialized_path AS parent_path
+    FROM files fi LEFT JOIN folders p ON p.id = fi.folder_id
+    WHERE fi.deleted_at IS NULL
+      AND fi.upload_status = 'complete'
+      AND (
+        (fi.folder_id IS NULL AND fi.owner_id = ${userId}::uuid)
+        OR split_part(p.materialized_path, '/', 2) IN (SELECT id FROM roots)
+      )
+    ORDER BY fi.updated_at DESC, fi.id
+    LIMIT ${take}
+  `;
+
+  const locationOf = await resolveLocations(rows);
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    type: "file" as const,
+    sizeBytes: row.size_bytes.toString(),
+    mimeType: row.mime_type,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+    parentFolderId: row.parent_id,
+    location: locationOf(row),
+  }));
 }

@@ -1,6 +1,7 @@
 import { db } from "../../db.js";
 import { checkPermission } from "../access/permission-check.js";
 import { folderNotFound } from "../filesystem/errors.js";
+import { resolveLocations } from "../filesystem/locations.js";
 
 interface SearchResultRow {
   id: string;
@@ -160,16 +161,7 @@ export async function searchWithin(userId: string, term: string, within: string)
   rows = rows.slice(0, SCOPED_RESULT_LIMIT);
 
   // Location: the folder chain from the starting point (exclusive) down to the item's parent.
-  const scopeIds = new Set(scopePath ? scopePath.split("/").filter(Boolean) : []);
-  const chainFor = (path: string | null) =>
-    path ? path.split("/").filter((id) => id && !scopeIds.has(id)) : [];
-  const allIds = [...new Set(rows.flatMap((r) => chainFor(r.parent_path)))];
-  const names = new Map(
-    (await db.folders.findMany({ where: { id: { in: allIds } }, select: { id: true, name: true } })).map((f) => [
-      f.id,
-      f.name,
-    ]),
-  );
+  const locationOf = await resolveLocations(rows, scopePath);
 
   return {
     truncated,
@@ -182,7 +174,7 @@ export async function searchWithin(userId: string, term: string, within: string)
       updatedAt: row.updated_at.toISOString(),
       parentFolderId: row.parent_id,
       // [] means directly in the folder being searched.
-      location: chainFor(row.parent_path).map((id) => ({ id, name: names.get(id) ?? "" })),
+      location: locationOf(row),
     })),
   };
 }

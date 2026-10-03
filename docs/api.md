@@ -90,6 +90,7 @@ curl -c jar -H 'Content-Type: application/json' \
 | GET | `/folders/:id/download-zip` | 🔒 | — | Streamed `application/zip` |
 | PATCH | `/files/:id` | 🔒 | `{ name?, folderId? }` | `{ file }` |
 | DELETE | `/files/:id` | 🔒 | — | `204` (moves to trash) |
+| GET | `/files/recent?limit=6` | 🔒 | — | `{ items }` (limit 1–50): newest files anywhere under My Files (your root files plus everything in your root folders, at any depth), by last change; each with `createdAt`, `parentFolderId` and `location` |
 | GET | `/files/:id/download` | 🔒 | — | `{ url }` (presigned MinIO URL) |
 | GET | `/files/:id/preview` | 🔒 | — | `{ available: true, url, ... }` or `{ available: false }` |
 | GET | `/files/:id/thumbnail` | 🔒 | — | `{ available: true, url }` or `{ available: false }` |

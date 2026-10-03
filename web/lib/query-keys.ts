@@ -9,6 +9,9 @@ export const queryKeys = {
   storageUsage: () => ["users", "me", "storage"] as const,
 
   folderContents: (folderId: string | null) => ["folders", folderId, "contents"] as const,
+  // Under the "folders" prefix on purpose: invalidating ["folders"] (e.g. when a folder upload
+  // finishes) refreshes it along with every listing.
+  recentFiles: () => ["folders", "recent"] as const,
   thumbnail: (fileId: string) => ["files", fileId, "thumbnail"] as const,
   search: (term: string) => ["search", term] as const,
   sharedWithMe: () => ["shared-with-me"] as const,

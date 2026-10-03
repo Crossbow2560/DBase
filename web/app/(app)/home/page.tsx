@@ -84,11 +84,24 @@ interface HomeItem {
   updatedAt: string;
 }
 
+// GET /files/recent: newest files anywhere under My Files, with where each one lives.
+interface RecentFile extends HomeItem {
+  createdAt: string;
+  parentFolderId: string | null;
+  location: { id: string; name: string }[];
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+// "Added …" for a file that hasn't changed since upload, "Updated …" once it has (renamed, moved).
+function formatRecency(file: RecentFile): string {
+  const changed = new Date(file.updatedAt).getTime() - new Date(file.createdAt).getTime() > 1000;
+  return formatAddedAt(file.updatedAt).replace(/^Added/, changed ? "Updated" : "Added");
 }
 
 function formatAddedAt(iso: string): string {
@@ -170,6 +183,14 @@ export default function HomePage() {
   const [isDragOver, setIsDragOver] = React.useState(false);
   const [previewFile, setPreviewFile] = React.useState<HomeItem | null>(null);
 
+  // From the server, across every subfolder — it used to be the root folder's own files sorted by
+  // date, so anything uploaded into a folder never showed up here.
+  const { data: recentData } = useQuery({
+    queryKey: queryKeys.recentFiles(),
+    queryFn: () => api.get<{ items: RecentFile[] }>("/files/recent?limit=6"),
+  });
+  const recentFiles = recentData?.items ?? [];
+
   const { data } = useQuery({
     queryKey: queryKeys.folderContents(null),
     queryFn: () => api.get<{ items: HomeItem[] }>("/folders/contents"),
@@ -177,7 +198,6 @@ export default function HomePage() {
 
   const folders = data?.items.filter((i) => i.type === "folder") ?? [];
   const files = data?.items.filter((i) => i.type === "file") ?? [];
-  const recentFiles = [...files].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 6);
 
   function handleFiles(fileList: FileList | null) {
     if (!fileList) return;
@@ -316,7 +336,15 @@ export default function HomePage() {
                         <span className="text-muted-foreground">{formatBytes(Number(file.sizeBytes))}</span>
                       )}
                     </div>
-                    <div className="mt-1 text-xs text-muted-foreground">{formatAddedAt(file.updatedAt)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{formatRecency(file)}</div>
+                    {file.location.length > 0 && (
+                      <div
+                        className="mt-0.5 truncate text-xs text-muted-foreground"
+                        title={file.location.map((l) => l.name).join(" / ")}
+                      >
+                        in {file.location.map((l) => l.name).join(" / ")}
+                      </div>
+                    )}
                   </div>
                 </button>
               );

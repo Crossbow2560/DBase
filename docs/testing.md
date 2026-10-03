@@ -37,6 +37,7 @@ npm run test:db:down        # optional
 | `invariants.test.ts` | per-user quota, system limit pre-allocation, last-admin protection, trash restore/purge (object + quota), share-link scope and expiry |
 | `folder-upload.test.ts` | `POST /folders/tree`: nested structure and owner permissions, implied ancestors, `Name (2)` on collision, shared-folder editor vs viewer, `..` and over-long names, the 4096-byte path limit, NFC normalization |
 | `folder-search.test.ts` | subtree search from My Files and from a folder, locations, sibling and trashed exclusion, literal `%`/`_`, editors' files inside your tree, access, unchanged global search |
+| `recent-files.test.ts` | nested files at any depth with locations, ordering, default limit and bounds, trashed and other users' trees excluded, renames count as changes |
 | `bootstrap-admin.test.ts` | the bootstrap script refuses `--password`, needs a TTY or `BOOTSTRAP_ADMIN_PASSWORD`, creates a working admin |
 | `secure-cookie.test.ts` | `Secure` cookies for an `https://` `PUBLIC_APP_URL` |
 

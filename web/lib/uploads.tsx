@@ -319,6 +319,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // folder listing itself, so a newly-uploaded file didn't show up anywhere (/home,
       // /folders, or the target subfolder) until some unrelated action happened to refetch it.
       queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(internal.task.folderId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.recentFiles() });
     } catch (err) {
       // Canceled meanwhile (e.g. the cancel's abort beat this completion): not a failure, and
       // cancel() has already aborted the session and set the status.

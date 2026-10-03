@@ -137,6 +137,21 @@ export async function filesystemRoutes(app: FastifyInstance) {
     },
   );
 
+  // Home page "Recent Files": newest files anywhere under My Files, not just the root folder.
+  app.get(
+    "/api/v1/files/recent",
+    {
+      preHandler: requireSession,
+      schema: {
+        querystring: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 50, default: 6 } } },
+      },
+    },
+    async (request, reply) => {
+      const { limit } = request.query as { limit: number };
+      reply.send({ items: await files.listRecentFiles(request.session!.user_id, limit) });
+    },
+  );
+
   app.get("/api/v1/files/:id/download", { preHandler: requireSession }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const url = await files.getDownloadUrl(request.session!.user_id, id);

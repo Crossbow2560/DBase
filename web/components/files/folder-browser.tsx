@@ -218,6 +218,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   function refreshListing() {
     queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
     queryClient.invalidateQueries({ queryKey: ["search"] });
+    queryClient.invalidateQueries({ queryKey: queryKeys.recentFiles() });
   }
 
   // Navigating into a different folder while items were selected left the old selection's ids
