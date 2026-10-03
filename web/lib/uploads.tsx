@@ -12,7 +12,8 @@
 
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ApiError } from "./api-client";
+import { api, ApiError } from "./api-client";
+import type { FolderSelection } from "./folder-upload";
 import { queryKeys } from "./query-keys";
 
 // Upload speed for large files was bound by per-request overhead (two proxy hops plus database
@@ -46,6 +47,12 @@ const RATE_LIMIT_MAX_RETRIES = 5;
 const RATE_LIMIT_FALLBACK_DELAY_MS = 5000;
 
 export type UploadStatus = "queued" | "uploading" | "paused" | "error" | "complete" | "canceled";
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -81,15 +88,36 @@ export interface UploadTask {
   uploadedBytes: number;
   status: UploadStatus;
   error?: string;
+  groupId?: string; // set for files that are part of a folder upload
+}
+
+// A folder upload: its files are ordinary UploadTasks (same queue, same concurrency) tagged with
+// the group's id; the tray shows the group as one row with combined progress.
+export interface UploadGroup {
+  id: string;
+  name: string;
+  // "preparing": reading the folder / checking quota / creating the folders; "ready": files are
+  // queued (overall progress comes from the files); "failed": nothing was uploaded.
+  phase: "preparing" | "ready" | "failed";
+  error?: string;
+  totalFiles: number;
+  totalBytes: number;
+  folderCount: number;
 }
 
 interface UploadControls {
   uploads: UploadTask[];
+  groups: UploadGroup[];
   startUpload: (file: File, folderId: string | null) => void;
+  startFolderUpload: (selection: FolderSelection, parentFolderId: string | null) => Promise<void>;
   pause: (id: string) => void;
   resume: (id: string) => void;
   cancel: (id: string) => void;
   dismiss: (id: string) => void;
+  pauseGroup: (groupId: string) => void;
+  resumeGroup: (groupId: string) => void;
+  cancelGroup: (groupId: string) => void;
+  dismissGroup: (groupId: string) => void;
 }
 
 const UploadContext = React.createContext<UploadControls | null>(null);
@@ -103,6 +131,9 @@ interface InternalTaskState {
   totalParts: number;
   completedParts: Set<number>;
   pauseRequested: boolean;
+  // Set synchronously by cancel(), before its abort request goes out, so the upload loop can tell
+  // a cancel from a pause and never completes (or reports as failed) a file being canceled.
+  cancelRequested: boolean;
 }
 
 // sessionStorage can throw (privacy modes, blocked storage) — losing the bookkeeping only means
@@ -149,6 +180,7 @@ async function abortSessionOnServer(uploadSessionId: string) {
 
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [uploads, setUploads] = React.useState<UploadTask[]>([]);
+  const [groups, setGroups] = React.useState<UploadGroup[]>([]);
   const internalRef = React.useRef<Map<string, InternalTaskState>>(new Map());
   // Task ids waiting for a concurrency slot, and how many loops are running right now.
   const queueRef = React.useRef<string[]>([]);
@@ -257,10 +289,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         Array.from({ length: Math.min(PARTS_IN_FLIGHT_PER_FILE, Math.max(1, pending.length)) }, worker),
       );
       if (failure !== null) throw failure;
+      if (internal.cancelRequested) return; // cancel() owns the final status
       if (internal.completedParts.size < internal.totalParts) {
-        // Stopped by pause/cancel before every part was sent.
-        // cancel() also sets pauseRequested; don't overwrite the "canceled" it left behind.
-        if (internal.task.status !== "canceled") updateTask(id, { status: "paused" });
+        // Stopped by pause before every part was sent.
+        updateTask(id, { status: "paused" });
         return;
       }
 
@@ -281,12 +313,16 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
       forgetSession(id);
       updateTask(id, { status: "complete", uploadedBytes: internal.file.size });
+      settleGroupIfDone(internal.task.groupId);
       queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
       // Was missing entirely — completion only ever refreshed the quota indicator, never the
       // folder listing itself, so a newly-uploaded file didn't show up anywhere (/home,
       // /folders, or the target subfolder) until some unrelated action happened to refetch it.
       queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(internal.task.folderId) });
     } catch (err) {
+      // Canceled meanwhile (e.g. the cancel's abort beat this completion): not a failure, and
+      // cancel() has already aborted the session and set the status.
+      if (internal.cancelRequested) return;
       // A failure here (network error, a later part rejected for quota, destination no longer
       // valid, etc.) can land after earlier parts already succeeded and had their bytes credited
       // against the user's quota server-side. Without explicitly aborting, that credited quota
@@ -302,6 +338,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         status: "error",
         error: err instanceof ApiError ? err.message : "Something went wrong.",
       });
+      settleGroupIfDone(internal.task.groupId);
     }
   }
 
@@ -327,7 +364,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     pump();
   }
 
-  function startUpload(file: File, folderId: string | null) {
+  function createTask(file: File, folderId: string | null, groupId?: string): UploadTask {
     const id = crypto.randomUUID();
     const task: UploadTask = {
       id,
@@ -336,6 +373,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       totalBytes: file.size,
       uploadedBytes: 0,
       status: "queued",
+      ...(groupId ? { groupId } : {}),
     };
     internalRef.current.set(id, {
       task,
@@ -345,9 +383,120 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       totalParts: 0,
       completedParts: new Set(),
       pauseRequested: false,
+      cancelRequested: false,
     });
+    return task;
+  }
+
+  function startUpload(file: File, folderId: string | null) {
+    const task = createTask(file, folderId);
     setUploads((prev) => [...prev, task]);
-    enqueue(id);
+    queueRef.current.push(task.id);
+    pump();
+  }
+
+  function updateGroup(id: string, patch: Partial<UploadGroup>) {
+    setGroups((prev) => prev.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+  }
+
+  /**
+   * Uploads a folder selection (web/lib/folder-upload.ts) into `parentFolderId`: checks there's
+   * room for it, creates every directory in one request (POST /folders/tree — a top-level name
+   * that's already taken comes back as "Name (2)"), then queues each file into its folder.
+   */
+  async function startFolderUpload(selection: FolderSelection, parentFolderId: string | null) {
+    const groupId = crypto.randomUUID();
+    const totalBytes = selection.files.reduce((sum, f) => sum + f.file.size, 0);
+    setGroups((prev) => [
+      ...prev,
+      {
+        id: groupId,
+        name: selection.roots.length === 1 ? selection.roots[0]! : `${selection.roots.length} folders`,
+        phase: "preparing",
+        totalFiles: selection.files.length,
+        totalBytes,
+        folderCount: selection.directories.length,
+      },
+    ]);
+
+    try {
+      // Fail up front rather than half-way through hundreds of files.
+      const usage = await api.get<{ storageUsedBytes: string; storageQuotaBytes: string }>("/users/me/storage");
+      const available = Number(usage.storageQuotaBytes) - Number(usage.storageUsedBytes);
+      if (totalBytes > available) {
+        throw new Error(
+          `Not enough storage: this folder needs ${formatSize(totalBytes)}, ${formatSize(Math.max(0, available))} available.`,
+        );
+      }
+
+      const created = await api.post<{ folders: Record<string, string>; roots: Record<string, string> }>(
+        "/folders/tree",
+        { parentFolderId, paths: selection.directories },
+      );
+      if (selection.roots.length === 1) {
+        updateGroup(groupId, { name: created.roots[selection.roots[0]!] ?? selection.roots[0]! });
+      }
+      queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(parentFolderId) });
+
+      const tasks = selection.files.map((f) => createTask(f.file, created.folders[f.dir] ?? null, groupId));
+      setUploads((prev) => [...prev, ...tasks]);
+      updateGroup(groupId, { phase: "ready" });
+      queueRef.current.push(...tasks.map((t) => t.id));
+      pump();
+    } catch (err) {
+      updateGroup(groupId, {
+        phase: "failed",
+        error: err instanceof Error ? err.message : "Could not upload this folder.",
+      });
+    }
+  }
+
+  // When the last file of a folder upload settles (complete, failed or canceled), refresh every
+  // folder listing: each file's completion only refreshes its own folder, but listings show
+  // recursive file counts and sizes, so the destination and all its ancestors are stale too.
+  function settleGroupIfDone(groupId: string | undefined) {
+    if (!groupId) return;
+    const unsettled = groupTaskIds(groupId).some((id) => {
+      const status = internalRef.current.get(id)?.task.status;
+      return status === "queued" || status === "uploading" || status === "paused";
+    });
+    if (!unsettled) queryClient.invalidateQueries({ queryKey: ["folders"] });
+  }
+
+  function groupTaskIds(groupId: string): string[] {
+    return [...internalRef.current.values()].filter((i) => i.task.groupId === groupId).map((i) => i.task.id);
+  }
+
+  function pauseGroup(groupId: string) {
+    for (const id of groupTaskIds(groupId)) {
+      const internal = internalRef.current.get(id)!;
+      if (internal.task.status === "uploading") pause(id);
+      // Not started yet: mark paused so the queue skips it and the UI says so.
+      else if (internal.task.status === "queued") {
+        internal.pauseRequested = true;
+        updateTask(id, { status: "paused" });
+      }
+    }
+  }
+
+  function resumeGroup(groupId: string) {
+    for (const id of groupTaskIds(groupId)) {
+      if (internalRef.current.get(id)!.task.status === "paused") resume(id);
+    }
+  }
+
+  function cancelGroup(groupId: string) {
+    for (const id of groupTaskIds(groupId)) {
+      const status = internalRef.current.get(id)!.task.status;
+      if (status === "queued" || status === "uploading" || status === "paused") void cancel(id);
+    }
+  }
+
+  function dismissGroup(groupId: string) {
+    const ids = new Set(groupTaskIds(groupId));
+    for (const id of ids) internalRef.current.delete(id);
+    setUploads((prev) => prev.filter((t) => !ids.has(t.id)));
+    setGroups((prev) => prev.filter((g) => g.id !== groupId));
   }
 
   function pause(id: string) {
@@ -364,13 +513,21 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   async function cancel(id: string) {
     const internal = internalRef.current.get(id);
-    if (internal?.uploadSessionId) {
+    if (!internal) return;
+    // Flags first, synchronously: the upload loop checks them before sending "complete".
+    internal.cancelRequested = true;
+    internal.pauseRequested = true;
+    if (internal.uploadSessionId) {
       await abortSessionOnServer(internal.uploadSessionId);
       queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
     }
-    if (internal) internal.pauseRequested = true;
+    // A completion already in flight can still win the race on the server (the abort then gets a
+    // 404). The file exists in that case, so it stays "complete" rather than being shown as
+    // canceled.
+    if (internal.task.status === "complete") return;
     forgetSession(id);
     updateTask(id, { status: "canceled" });
+    settleGroupIfDone(internal.task.groupId);
   }
 
   function dismiss(id: string) {
@@ -379,8 +536,21 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   }
 
   const value = React.useMemo(
-    () => ({ uploads, startUpload, pause, resume, cancel, dismiss }),
-    [uploads],
+    () => ({
+      uploads,
+      groups,
+      startUpload,
+      startFolderUpload,
+      pause,
+      resume,
+      cancel,
+      dismiss,
+      pauseGroup,
+      resumeGroup,
+      cancelGroup,
+      dismissGroup,
+    }),
+    [uploads, groups],
   );
 
   return <UploadContext.Provider value={value}>{children}</UploadContext.Provider>;

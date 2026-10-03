@@ -12,6 +12,7 @@ import {
   Home,
   ChevronRight,
   FolderPlus,
+  FolderUp,
   Upload,
   Folder,
   FileText,
@@ -34,6 +35,7 @@ import { api, ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { queryKeys } from "@/lib/query-keys";
 import { useUploads } from "@/lib/uploads";
+import { collectDroppedItems, collectFromDirectoryInput, isIgnoredFile } from "@/lib/folder-upload";
 import { formatBytes, formatDate } from "@/lib/format";
 import { useViewPreference } from "@/lib/use-view-preference";
 import { Button } from "@/components/ui/button";
@@ -78,8 +80,9 @@ interface AncestorFolder {
 
 export function FolderBrowser({ folderId }: { folderId: string | null }) {
   const queryClient = useQueryClient();
-  const { startUpload } = useUploads();
+  const { startUpload, startFolderUpload } = useUploads();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const folderInputRef = React.useRef<HTMLInputElement>(null);
   const [showNewFolderModal, setShowNewFolderModal] = React.useState(false);
   const [previewItem, setPreviewItem] = React.useState<FolderContentsItem | null>(null);
   const [shareItem, setShareItem] = React.useState<FolderContentsItem | null>(null);
@@ -258,15 +261,20 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
     const files = e.target.files;
     if (!files) return;
     for (const file of Array.from(files)) {
-      startUpload(file, folderId);
+      if (!isIgnoredFile(file.name)) startUpload(file, folderId);
     }
     e.target.value = "";
   }
 
-  // Files only, not folders — a dragged folder shows up as a DataTransferItem whose
-  // webkitGetAsEntry() is a directory, which File()/startUpload() can't handle; recursively
-  // walking that tree is real added scope this doesn't attempt, so a dropped folder is silently
-  // skipped rather than uploaded as a broken zero-byte file.
+  // "Upload folder": an <input webkitdirectory> selection keeps each file's path inside the picked
+  // folder (web/lib/folder-upload.ts), so the structure is recreated here.
+  function onFolderSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    const selection = files ? collectFromDirectoryInput(files) : null;
+    if (selection) void startFolderUpload(selection, folderId);
+    e.target.value = "";
+  }
+
   function onDragEnter(e: React.DragEvent) {
     if (!e.dataTransfer.types.includes("Files")) return;
     e.preventDefault();
@@ -293,18 +301,13 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
     dragCounterRef.current = 0;
     setIsDraggingOver(false);
 
-    // dataTransfer.items (not the plain .files list) is what exposes webkitGetAsEntry() — the
-    // only way to actually distinguish a dropped folder from a dropped file. .files alone
-    // represents a dropped folder as a same-shaped File entry (0 bytes, empty type), which would
-    // silently upload as a bogus empty file instead of being skipped as the comment above claims.
-    const items = Array.from(e.dataTransfer.items);
-    for (const item of items) {
-      if (item.kind !== "file") continue;
-      const entry = item.webkitGetAsEntry?.();
-      if (entry && !entry.isFile) continue; // a dropped folder — skipped, not attempted
-      const file = item.getAsFile();
-      if (file) startUpload(file, folderId);
-    }
+    // Dropped files upload here; dropped folders are uploaded with their whole structure. The
+    // drop's items are only readable during this event — collectDroppedItems() captures them
+    // synchronously before walking the folders.
+    void collectDroppedItems(e.dataTransfer).then(({ looseFiles, folders }) => {
+      for (const file of looseFiles) startUpload(file, folderId);
+      if (folders) void startFolderUpload(folders, folderId);
+    });
   }
 
   function toggleSelected(id: string) {
@@ -487,6 +490,22 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
             New Folder
           </Button>
           <input ref={fileInputRef} type="file" multiple className="hidden" onChange={onFilesSelected} />
+          {/* webkitdirectory isn't in React's input typings; set as a plain DOM attribute. */}
+          <input
+            ref={(el) => {
+              folderInputRef.current = el;
+              el?.setAttribute("webkitdirectory", "");
+            }}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={onFolderSelected}
+            data-testid="folder-input"
+          />
+          <Button size="sm" variant="outline" onClick={() => folderInputRef.current?.click()}>
+            <FolderUp className="mr-1.5 h-4 w-4" aria-hidden />
+            Upload folder
+          </Button>
           <Button size="sm" onClick={() => fileInputRef.current?.click()}>
             <Upload className="mr-1.5 h-4 w-4" aria-hidden />
             Upload

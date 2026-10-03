@@ -59,5 +59,7 @@ export const lengthRequired = () =>
 export const uploadIncomplete = () =>
   new AppError(409, "UPLOAD_SESSION_INVALID", "Not every part of this upload has been received yet.");
 
+export const invalidFolderTree = (message: string) => new AppError(400, "VALIDATION_ERROR", message);
+
 export const noLongerAvailable = () =>
   new AppError(404, "NO_LONGER_AVAILABLE", "This file is no longer available.");

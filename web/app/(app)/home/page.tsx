@@ -12,6 +12,7 @@ import { UploadCloud, Folder, FileText, Image as ImageIcon, FileSpreadsheet, Fil
 import { api } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { useUploads } from "@/lib/uploads";
+import { collectDroppedItems, collectFromDirectoryInput, isIgnoredFile } from "@/lib/folder-upload";
 import { useAuth } from "@/lib/auth";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { MultiRingChart } from "@/components/ui/multi-ring-chart";
@@ -163,8 +164,9 @@ function FolderCard({ folder, colorIndex }: { folder: HomeItem; colorIndex: numb
 
 export default function HomePage() {
   const { user } = useAuth();
-  const { startUpload } = useUploads();
+  const { startUpload, startFolderUpload } = useUploads();
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const folderInputRef = React.useRef<HTMLInputElement>(null);
   const [isDragOver, setIsDragOver] = React.useState(false);
   const [previewFile, setPreviewFile] = React.useState<HomeItem | null>(null);
 
@@ -180,7 +182,7 @@ export default function HomePage() {
   function handleFiles(fileList: FileList | null) {
     if (!fileList) return;
     for (const file of Array.from(fileList)) {
-      startUpload(file, null);
+      if (!isIgnoredFile(file.name)) startUpload(file, null);
     }
   }
 
@@ -211,7 +213,12 @@ export default function HomePage() {
         onDrop={(e) => {
           e.preventDefault();
           setIsDragOver(false);
-          handleFiles(e.dataTransfer.files);
+          // Not e.dataTransfer.files: that lists a dropped folder as a bogus 0-byte "file". The
+          // items API tells folders apart, and folders upload with their whole structure.
+          void collectDroppedItems(e.dataTransfer).then(({ looseFiles, folders }) => {
+            for (const file of looseFiles) startUpload(file, null);
+            if (folders) void startFolderUpload(folders, null);
+          });
         }}
         className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed py-12 text-center transition-colors ${
           isDragOver ? "border-accent bg-accent/5" : "border-border hover:bg-muted/20"
@@ -227,9 +234,36 @@ export default function HomePage() {
             e.target.value = "";
           }}
         />
+        <input
+          ref={(el) => {
+            folderInputRef.current = el;
+            el?.setAttribute("webkitdirectory", "");
+          }}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            const selection = e.target.files ? collectFromDirectoryInput(e.target.files) : null;
+            if (selection) void startFolderUpload(selection, null);
+            e.target.value = "";
+          }}
+        />
         <UploadCloud className="h-8 w-8 text-accent" aria-hidden />
-        <div className="font-medium text-accent">Drop files here to upload</div>
-        <div className="text-sm text-muted-foreground">or click to browse from your computer</div>
+        <div className="font-medium text-accent">Drop files or folders here to upload</div>
+        <div className="text-sm text-muted-foreground">
+          or click to browse from your computer, or{" "}
+          <button
+            type="button"
+            className="font-medium text-accent underline-offset-2 hover:underline"
+            onClick={(e) => {
+              e.stopPropagation(); // the whole drop zone is itself a click-to-browse-files button
+              folderInputRef.current?.click();
+            }}
+            onKeyDown={(e) => e.stopPropagation()} // keep Enter/Space from also opening the file picker
+          >
+            upload a folder
+          </button>
+        </div>
       </div>
 
       <section>

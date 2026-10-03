@@ -19,7 +19,8 @@ This guide assumes the stack is running and an admin has been bootstrapped (see 
 ## Files and folders
 
 - **My Files** (`/folders`) is your root, and `/folders/<id>` is a subfolder. Breadcrumbs show the full ancestor chain.
-- **Upload:** drag and drop files, or whole folders, onto the browser. The bottom-right upload tray shows per-file progress with pause, resume and cancel. Large drops are queued, 3 uploads at a time.
+- **Upload files:** drag and drop them onto the browser, or use **Upload**. The bottom-right tray shows per-file progress with pause, resume and cancel. Files upload 3 at a time, each in several parallel parts.
+- **Upload folders:** drag and drop a folder (or several), or use **Upload folder**; on Home, use the "upload a folder" link. The whole structure is recreated, including empty subfolders when dragged (the folder picker can't see empty folders). If a folder with the same name already exists, the upload becomes `Name (2)` rather than merging. A folder upload is one row in the tray, with combined progress, a file count, any failed files, and pause, resume and cancel for the whole folder. Before anything is created, it checks that the folder fits in your remaining quota. OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) are skipped.
 - **Row actions:**
   - rename, move (a folder can't be moved into its own subtree)
   - download (folders download as `.zip`), preview

@@ -44,3 +44,25 @@ export async function assertPathLengthOk(parentFolderId: string | null, newSegme
     throw pathTooLong();
   }
 }
+
+/**
+ * Byte length of the human-readable path down to and including `folderId` (each segment's name
+ * plus one separator, the same accounting as assertPathLengthOk), so a caller building many paths
+ * under one folder (folder-tree uploads) can check each against MAX_PATH_BYTES without re-walking
+ * the ancestor chain per path.
+ */
+export async function humanPathBytes(folderId: string | null): Promise<number> {
+  let total = 0;
+  let currentId = folderId;
+  while (currentId) {
+    const folder = await db.folders.findUniqueOrThrow({
+      where: { id: currentId },
+      select: { name: true, parent_folder_id: true },
+    });
+    total += Buffer.byteLength(folder.name, "utf8") + 1;
+    currentId = folder.parent_folder_id;
+  }
+  return total;
+}
+
+export { MAX_NAME_BYTES, MAX_PATH_BYTES };

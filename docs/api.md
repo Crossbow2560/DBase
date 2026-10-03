@@ -41,6 +41,7 @@ The client IP is taken from `X-Forwarded-For` as appended by trusted proxy hops 
 | Default (all routes) | 300 / min | session cookie hash, or IP |
 | register, login, password-reset request, resend-verification | 20 / 15 min | IP |
 | Write-heavy (create, move, rename, delete, tags, favorites, admin mutations) | 60 / min | session |
+| Upload session start (`POST /files`) | 300 / min | session |
 | Admin backup and restore | 3 / 10 min | session |
 | Public share-link routes, inbound email webhook | 300 / min | client IP |
 | Public share-link folder zip | 10 / min | client IP |
@@ -83,6 +84,7 @@ curl -c jar -H 'Content-Type: application/json' \
 | GET | `/folders/contents` | 🔒 | — | Root listing: `{ folder: null, items }` |
 | GET | `/folders/:id/contents` | 🔒 | — | `{ folder: { id, name, parentFolderId }, ancestors: [{id,name}], items }` |
 | POST | `/folders` | 🔒 | `{ name, parentFolderId? }` | `201 { folder }` |
+| POST | `/folders/tree` | 🔒 | `{ paths: ["Photos", "Photos/2024", …], parentFolderId? }` (≤10,000) | `201 { folders: { <path>: id }, roots: { <path>: finalName } }` |
 | PATCH | `/folders/:id` | 🔒 | `{ name?, parentFolderId? }` (rename and/or move) | `{ folder }` |
 | DELETE | `/folders/:id` | 🔒 | — | `204` (moves to trash) |
 | GET | `/folders/:id/download-zip` | 🔒 | — | Streamed `application/zip` |
@@ -93,6 +95,8 @@ curl -c jar -H 'Content-Type: application/json' \
 | GET | `/files/:id/thumbnail` | 🔒 | — | `{ available: true, url }` or `{ available: false }` |
 
 Names are NFC-normalized and trimmed. A name may be at most 255 bytes, and the full human-readable path at most 4096 bytes.
+
+`POST /folders/tree` creates a folder upload's whole directory structure in one request (implied ancestors included; requires editor access to `parentFolderId`). A top-level folder whose name is already taken at the destination is created as `Name (2)`, `Name (3)`, …, never merged. Both maps in the response are keyed by the exact path strings that were sent. Files are then uploaded into the returned folder ids with the normal upload endpoints.
 
 ### Upload (chunked)
 

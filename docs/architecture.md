@@ -103,6 +103,10 @@ POST /files/upload-sessions/:id/complete     → claim session (pending → comp
 - On page load the frontend cancels any upload interrupted by a refresh of that tab (ids kept in `sessionStorage`), releasing its quota immediately.
 - The destination folder and name are re-validated on every part and on completion. Sibling names are unique per folder regardless of who owns each item (`0023`).
 
+### Folder uploads
+
+`web/lib/folder-upload.ts` turns a drop (via `webkitGetAsEntry()`, reading directories in batches until empty) or an `<input webkitdirectory>` selection (via `webkitRelativePath`) into a list of directories plus files. The upload provider checks quota, creates every directory in one `POST /folders/tree` (`folder-tree-service.ts`: two bulk inserts, folders plus owner permissions, in one transaction), then queues each file into its folder through the normal upload path. The tray shows the folder as one group.
+
 ### Downloads and previews
 
 The backend never streams single files. `GET /files/:id/download|preview|thumbnail` checks permission and returns a short-lived presigned MinIO URL that the browser loads directly. Folder zips are the exception: `archiver` streams them through Fastify straight from MinIO object streams, without temp files.
