@@ -36,7 +36,7 @@ function CancelButton({ onClick }: { onClick: () => void }) {
 }
 
 function FileRow({ task }: { task: UploadTask }) {
-  const { pause, resume, cancel, dismiss } = useUploads();
+  const { pause, resume, cancel, dismiss, retry } = useUploads();
   const percent = task.totalBytes > 0 ? Math.round((task.uploadedBytes / task.totalBytes) * 100) : 0;
   return (
     <div className="p-3">
@@ -73,6 +73,11 @@ function FileRow({ task }: { task: UploadTask }) {
             Resume
           </Button>
         )}
+        {task.status === "error" && (
+          <Button size="sm" variant="outline" onClick={() => retry(task.id)}>
+            Retry
+          </Button>
+        )}
         {(task.status === "complete" || task.status === "canceled" || task.status === "error") && (
           <Button size="sm" variant="ghost" onClick={() => dismiss(task.id)}>
             Dismiss
@@ -84,7 +89,7 @@ function FileRow({ task }: { task: UploadTask }) {
 }
 
 function GroupRow({ group, tasks }: { group: UploadGroup; tasks: UploadTask[] }) {
-  const { pauseGroup, resumeGroup, cancelGroup, dismissGroup } = useUploads();
+  const { pauseGroup, resumeGroup, cancelGroup, dismissGroup, retryGroup } = useUploads();
 
   const count = (status: UploadTask["status"]) => tasks.filter((t) => t.status === status).length;
   const completed = count("complete");
@@ -152,6 +157,16 @@ function GroupRow({ group, tasks }: { group: UploadGroup; tasks: UploadTask[] })
             Resume
           </Button>
         )}
+        {group.phase === "failed" && (
+          <Button size="sm" variant="outline" onClick={() => retryGroup(group.id)}>
+            Retry
+          </Button>
+        )}
+        {group.phase === "ready" && finished && failed.length > 0 && (
+          <Button size="sm" variant="outline" onClick={() => retryGroup(group.id)}>
+            Retry failed ({failed.length})
+          </Button>
+        )}
         {finished && (
           <Button size="sm" variant="ghost" onClick={() => dismissGroup(group.id)}>
             Dismiss
@@ -169,7 +184,7 @@ export function UploadTray() {
   if (ungrouped.length === 0 && groups.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 w-80 overflow-hidden rounded-lg border border-border bg-background shadow-xl">
+    <div className="fixed bottom-4 right-4 z-50 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-border bg-background shadow-xl">
       <div className="flex items-center justify-between border-b border-border bg-muted/40 px-3 py-2 text-sm font-medium">
         Uploads ({groups.length + ungrouped.length})
       </div>

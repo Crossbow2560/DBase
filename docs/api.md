@@ -24,7 +24,7 @@ There is also an unversioned `GET /health` → `{"status":"ok"}`.
 | 401 | `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `PASSWORD_REQUIRED` / `INVALID_PASSWORD` (share link), `INVALID_SIGNATURE`, `INBOUND_NOT_CONFIGURED` |
 | 403 | `ACCOUNT_DEACTIVATED`, `EMAIL_NOT_VERIFIED`, `INSUFFICIENT_PERMISSION`, `REGISTRATION_CLOSED` |
 | 404 | `NOT_FOUND` (also returned when you lack access, so existence isn't leaked), `SESSION_NOT_FOUND`, `UPLOAD_SESSION_NOT_FOUND`, `NO_LONGER_AVAILABLE` |
-| 409 | `NAME_COLLISION`, `CYCLE_DETECTED`, `NOT_IN_TRASH`, `PURGE_IN_FLIGHT`, `UPLOAD_SESSION_INVALID`, `LAST_ADMIN`, `NO_SYSTEM_ADMIN`, `SYSTEM_STORAGE_ALLOCATION_EXCEEDED` |
+| 409 | `UPLOAD_IN_PROGRESS` (retry the completion shortly), `NAME_COLLISION`, `CYCLE_DETECTED`, `NOT_IN_TRASH`, `PURGE_IN_FLIGHT`, `UPLOAD_SESSION_INVALID`, `LAST_ADMIN`, `NO_SYSTEM_ADMIN`, `SYSTEM_STORAGE_ALLOCATION_EXCEEDED` |
 | 411 | `LENGTH_REQUIRED` (upload part without `Content-Length`) |
 | 413 | `PART_TOO_LARGE` (upload part over 64 MiB) |
 | 422 | `QUOTA_EXCEEDED`, `SYSTEM_STORAGE_LIMIT_EXCEEDED` |
@@ -105,7 +105,7 @@ Names are NFC-normalized and trimmed. A name may be at most 255 bytes, and the f
 |---|---|---|---|
 | POST | `/files` | `{ targetName, totalParts (≥1), targetFolderId? }` | `201 { uploadSessionId, expiresAt }` |
 | PUT | `/files/upload-sessions/:id/parts/:partNumber` | raw bytes (`application/octet-stream`, with `Content-Length`, ≤64 MiB) | `204` |
-| POST | `/files/upload-sessions/:id/complete` | `{ mimeType? }` | `{ file }` |
+| POST | `/files/upload-sessions/:id/complete` | `{ mimeType? }` | `{ file }`. Idempotent: repeating it returns the same file; `409 UPLOAD_IN_PROGRESS` while the first is still finalizing |
 | DELETE | `/files/upload-sessions/:id` | — | `204` (cancels and credits quota back) |
 
 ```bash

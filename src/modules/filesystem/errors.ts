@@ -56,6 +56,9 @@ export const partTooLarge = (maxBytes: number) =>
 export const lengthRequired = () =>
   new AppError(411, "LENGTH_REQUIRED", "Upload parts must be sent with a Content-Length header.");
 
+export const uploadCompleting = () =>
+  new AppError(409, "UPLOAD_IN_PROGRESS", "This upload is still being finalized. Try again in a moment.");
+
 export const uploadIncomplete = () =>
   new AppError(409, "UPLOAD_SESSION_INVALID", "Not every part of this upload has been received yet.");
 

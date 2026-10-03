@@ -16,6 +16,7 @@ import {
   partTooSmall,
   partTooLarge,
   uploadIncomplete,
+  uploadCompleting,
 } from "./errors.js";
 import { checkPermission } from "../access/permission-check.js";
 import { createOwnerPermission } from "../access/permission-service.js";
@@ -157,7 +158,21 @@ export async function completeUpload(userId: string, sessionId: string, mimeType
     where: { id: sessionId, user_id: userId, status: "pending" },
     data: { status: "complete" },
   });
-  if (claimed.count === 0) throw uploadSessionNotFound();
+  if (claimed.count === 0) {
+    // Idempotent: a client retrying a completion whose response it never received (dropped
+    // connection) gets the file that was already created, instead of a 404 for an upload that in
+    // fact succeeded. If the first completion is still running, the retry is told to try again.
+    const existing = await db.upload_sessions.findFirst({
+      where: { id: sessionId, user_id: userId, status: "complete" },
+      select: { file_id: true },
+    });
+    if (existing && existing.file_id === null) throw uploadCompleting();
+    if (existing?.file_id) {
+      const file = await db.files.findFirst({ where: { id: existing.file_id, deleted_at: null } });
+      if (file) return file;
+    }
+    throw uploadSessionNotFound();
+  }
   const session = await db.upload_sessions.findUniqueOrThrow({ where: { id: sessionId } });
 
   const releaseClaim = () =>

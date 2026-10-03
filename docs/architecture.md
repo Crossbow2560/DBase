@@ -101,6 +101,7 @@ POST /files/upload-sessions/:id/complete     → claim session (pending → comp
 - Parts are idempotent: re-sending a recorded part is a no-op. Recording the part and charging quota happen in one transaction holding the session row's lock, so concurrent retries charge once and an abort always sees (and refunds) every charged part.
 - Completion composes the object **before** creating the file row. A compose failure returns the session to `pending` (the client can retry or cancel); a DB failure deletes the composed object and aborts with a refund. Cancel, the cleanup worker and a failing completion each claim the session with a conditional update, so only one of them ever refunds.
 - On page load the frontend cancels any upload interrupted by a refresh of that tab (ids kept in `sessionStorage`), releasing its quota immediately.
+- Transient failures (network errors, 5xx, 408, `UPLOAD_IN_PROGRESS`) are retried with backoff (1 s, 2 s, 4 s). After that the file fails but keeps its server session, so a manual Retry sends only the missing parts. Permanent failures abort the session (refunding quota) and Retry starts over. Completion is idempotent, so a retried "complete" whose first response was lost returns the existing file.
 - The destination folder and name are re-validated on every part and on completion. Sibling names are unique per folder regardless of who owns each item (`0023`).
 
 ### Folder uploads

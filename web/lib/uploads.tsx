@@ -80,6 +80,49 @@ async function fetchWithRateLimitRetry(
   }
 }
 
+// Transient failures — the request never got an answer (dropped connection, proxy reset), a 5xx, a
+// timeout, or the server saying a completion is still being finalized — are retried a few times
+// with backoff before the file is marked failed. Safe to repeat: the server treats a repeated part
+// as a no-op and a repeated completion returns the file already created.
+const TRANSIENT_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
+async function errorCodeOf(res: Response): Promise<string | undefined> {
+  try {
+    return ((await res.clone().json()) as { error?: { code?: string } })?.error?.code;
+  } catch {
+    return undefined;
+  }
+}
+
+async function isTransientResponse(res: Response): Promise<boolean> {
+  if (res.status >= 500 || res.status === 408) return true;
+  return res.status === 409 && (await errorCodeOf(res)) === "UPLOAD_IN_PROGRESS";
+}
+
+async function fetchWithRetry(input: string, init: RequestInit, shouldAbort: () => boolean): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    let res: Response | null = null;
+    let thrown: unknown = null;
+    try {
+      res = await fetchWithRateLimitRetry(input, init, shouldAbort);
+    } catch (err) {
+      thrown = err; // network failure: fetch() itself rejects
+    }
+    const transient = thrown !== null || (res !== null && (await isTransientResponse(res)));
+    if (!transient || attempt >= TRANSIENT_RETRY_DELAYS_MS.length || shouldAbort()) {
+      if (thrown !== null) throw thrown;
+      return res!;
+    }
+    await delay(TRANSIENT_RETRY_DELAYS_MS[attempt]! + Math.random() * 500);
+  }
+}
+
+/** Failed for a reason that may go away (connectivity, server trouble) rather than one that won't. */
+function isTransientFailure(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return true; // network error / unexpected exception
+  return err.status >= 500 || err.status === 408 || err.code === "UPLOAD_IN_PROGRESS";
+}
+
 export interface UploadTask {
   id: string;
   fileName: string;
@@ -114,6 +157,8 @@ interface UploadControls {
   resume: (id: string) => void;
   cancel: (id: string) => void;
   dismiss: (id: string) => void;
+  retry: (id: string) => void;
+  retryGroup: (groupId: string) => void;
   pauseGroup: (groupId: string) => void;
   resumeGroup: (groupId: string) => void;
   cancelGroup: (groupId: string) => void;
@@ -134,6 +179,8 @@ interface InternalTaskState {
   // Set synchronously by cancel(), before its abort request goes out, so the upload loop can tell
   // a cancel from a pause and never completes (or reports as failed) a file being canceled.
   cancelRequested: boolean;
+  // Set by retry(): if the kept server session has expired meanwhile, start over instead of failing.
+  retrying: boolean;
 }
 
 // sessionStorage can throw (privacy modes, blocked storage) — losing the bookkeeping only means
@@ -181,6 +228,13 @@ async function abortSessionOnServer(uploadSessionId: string) {
 export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [uploads, setUploads] = React.useState<UploadTask[]>([]);
   const [groups, setGroups] = React.useState<UploadGroup[]>([]);
+  // Latest groups for event handlers, and each folder upload's original selection (for retrying
+  // one whose preparation failed).
+  const groupsRef = React.useRef<UploadGroup[]>([]);
+  groupsRef.current = groups;
+  const folderSelectionsRef = React.useRef(
+    new Map<string, { selection: FolderSelection; parentFolderId: string | null }>(),
+  );
   const internalRef = React.useRef<Map<string, InternalTaskState>>(new Map());
   // Task ids waiting for a concurrency slot, and how many loops are running right now.
   const queueRef = React.useRef<string[]>([]);
@@ -214,7 +268,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         internal.partSize = choosePartSize(internal.file.size);
         internal.totalParts = Math.max(1, Math.ceil(internal.file.size / internal.partSize));
         const totalParts = internal.totalParts;
-        const res = await fetchWithRateLimitRetry(
+        const res = await fetchWithRetry(
           "/api/v1/files",
           {
             method: "POST",
@@ -258,7 +312,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           const start = partNumber * internal!.partSize;
           const chunk = internal!.file.slice(start, Math.min(start + internal!.partSize, internal!.file.size));
           try {
-            const res = await fetchWithRateLimitRetry(
+            const res = await fetchWithRetry(
               `/api/v1/files/upload-sessions/${internal!.uploadSessionId}/parts/${partNumber}`,
               {
                 method: "PUT",
@@ -296,7 +350,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const completeRes = await fetchWithRateLimitRetry(
+      const completeRes = await fetchWithRetry(
         `/api/v1/files/upload-sessions/${internal.uploadSessionId}/complete`,
         {
           method: "POST",
@@ -311,6 +365,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         throw new ApiError(completeRes.status, body?.error?.code ?? "INTERNAL_ERROR", body?.error?.message ?? "Could not finalize upload.");
       }
 
+      internal.retrying = false;
       forgetSession(id);
       updateTask(id, { status: "complete", uploadedBytes: internal.file.size });
       settleGroupIfDone(internal.task.groupId);
@@ -324,21 +379,40 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // Canceled meanwhile (e.g. the cancel's abort beat this completion): not a failure, and
       // cancel() has already aborted the session and set the status.
       if (internal.cancelRequested) return;
-      // A failure here (network error, a later part rejected for quota, destination no longer
-      // valid, etc.) can land after earlier parts already succeeded and had their bytes credited
-      // against the user's quota server-side. Without explicitly aborting, that credited quota
-      // would sit "used" against an upload that never completes until the session's TTL-based
-      // cleanup worker eventually reclaims it (config.uploadSessionTtlMinutes) — visibly wrong to
-      // the user in the meantime. Abort immediately instead, same as an explicit cancel.
-      if (internal.uploadSessionId) {
-        await abortSessionOnServer(internal.uploadSessionId);
-        forgetSession(id);
-        queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
+
+      // Retrying a kept session that expired in the meantime (the server cleans up sessions after
+      // UPLOAD_SESSION_TTL_MINUTES): start this file over rather than failing it again.
+      if (internal.retrying && err instanceof ApiError && err.code === "UPLOAD_SESSION_NOT_FOUND") {
+        internal.retrying = false;
+        // Release the expired session's stored parts now rather than at the next cleanup sweep.
+        if (internal.uploadSessionId) await abortSessionOnServer(internal.uploadSessionId);
+        resetSession(id, internal);
+        return runUploadLoop(id);
       }
-      updateTask(id, {
-        status: "error",
-        error: err instanceof ApiError ? err.message : "Something went wrong.",
-      });
+      internal.retrying = false;
+
+      if (isTransientFailure(err) && internal.uploadSessionId) {
+        // Connectivity or server trouble that outlasted the automatic retries. Keep the server
+        // session (and the parts already stored) so Retry continues where this stopped; the
+        // session id stays remembered, so a page refresh still releases it (see takeInterrupted…).
+        updateTask(id, {
+          status: "error",
+          error: "Connection problem — upload interrupted. Retry to continue where it stopped.",
+        });
+      } else {
+        // A failure that retrying the same parts won't fix (quota, name taken, destination gone…).
+        // Earlier parts may already have been charged against quota; abort now rather than leave
+        // that charge until the session's TTL cleanup. Retry starts the file over.
+        if (internal.uploadSessionId) {
+          await abortSessionOnServer(internal.uploadSessionId);
+          queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
+        }
+        resetSession(id, internal);
+        updateTask(id, {
+          status: "error",
+          error: err instanceof ApiError ? err.message : "Something went wrong.",
+        });
+      }
       settleGroupIfDone(internal.task.groupId);
     }
   }
@@ -385,6 +459,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       completedParts: new Set(),
       pauseRequested: false,
       cancelRequested: false,
+      retrying: false,
     });
     return task;
   }
@@ -419,7 +494,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         folderCount: selection.directories.length,
       },
     ]);
+    folderSelectionsRef.current.set(groupId, { selection, parentFolderId });
+    await prepareFolderUpload(groupId);
+  }
 
+  /** Quota check, folder creation and queueing for a folder upload — re-run by retryGroup(). */
+  async function prepareFolderUpload(groupId: string) {
+    const { selection, parentFolderId } = folderSelectionsRef.current.get(groupId)!;
+    const totalBytes = selection.files.reduce((sum, f) => sum + f.file.size, 0);
     try {
       // Fail up front rather than half-way through hundreds of files.
       const usage = await api.get<{ storageUsedBytes: string; storageQuotaBytes: string }>("/users/me/storage");
@@ -493,11 +575,48 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  /**
+   * Retry a folder upload: if preparing it failed (quota check, folder creation), run that again;
+   * otherwise retry each of its failed files.
+   */
+  function retryGroup(groupId: string) {
+    const group = groupsRef.current.find((g) => g.id === groupId);
+    if (group?.phase === "failed") {
+      updateGroup(groupId, { phase: "preparing", error: undefined });
+      void prepareFolderUpload(groupId);
+      return;
+    }
+    for (const id of groupTaskIds(groupId)) {
+      if (internalRef.current.get(id)?.task.status === "error") retry(id);
+    }
+  }
+
   function dismissGroup(groupId: string) {
     const ids = new Set(groupTaskIds(groupId));
-    for (const id of ids) internalRef.current.delete(id);
-    setUploads((prev) => prev.filter((t) => !ids.has(t.id)));
+    for (const id of ids) dismiss(id); // releases any session a failed file still holds
+    folderSelectionsRef.current.delete(groupId);
     setGroups((prev) => prev.filter((g) => g.id !== groupId));
+  }
+
+  /** Forget the server session so the next run starts this file from scratch. */
+  function resetSession(id: string, internal: InternalTaskState) {
+    internal.uploadSessionId = null;
+    internal.partSize = 0;
+    internal.totalParts = 0;
+    internal.completedParts = new Set();
+    forgetSession(id);
+    updateTask(id, { uploadedBytes: 0 });
+  }
+
+  /** Retry a failed file: continues from the parts already stored if the session was kept. */
+  function retry(id: string) {
+    const internal = internalRef.current.get(id);
+    if (!internal || internal.task.status !== "error") return;
+    internal.pauseRequested = false;
+    internal.cancelRequested = false;
+    internal.retrying = internal.uploadSessionId !== null;
+    updateTask(id, { error: undefined });
+    enqueue(id);
   }
 
   function pause(id: string) {
@@ -532,6 +651,14 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   }
 
   function dismiss(id: string) {
+    // A failed upload may still hold a server session (kept for Retry); release it and its quota.
+    const sessionId = internalRef.current.get(id)?.uploadSessionId;
+    if (internalRef.current.get(id)?.task.status === "error" && sessionId) {
+      void abortSessionOnServer(sessionId).then(() =>
+        queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() }),
+      );
+      forgetSession(id);
+    }
     internalRef.current.delete(id);
     setUploads((prev) => prev.filter((t) => t.id !== id));
   }
@@ -546,6 +673,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       resume,
       cancel,
       dismiss,
+      retry,
+      retryGroup,
       pauseGroup,
       resumeGroup,
       cancelGroup,

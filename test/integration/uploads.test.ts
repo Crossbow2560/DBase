@@ -293,3 +293,35 @@ describe("upload throughput path (parallel, streamed, larger parts)", () => {
     assert.equal(await storageUsed(env, user.id), 1000n);
   });
 });
+
+describe("idempotent completion (retries)", () => {
+  test("completing twice returns the same file instead of a 404, and charges once", async () => {
+    const { user, cookie } = await createUserAndLogin(env);
+    const sid = await initSession(cookie, 1, "twice.txt");
+    assert.equal((await putPart(env, cookie, sid, 0, Buffer.from("hello"))).statusCode, 204);
+    const first = await api(env, cookie).post(`/files/upload-sessions/${sid}/complete`, {});
+    const second = await api(env, cookie).post(`/files/upload-sessions/${sid}/complete`, {});
+    assert.equal(first.statusCode, 200, first.body);
+    assert.equal(second.statusCode, 200, second.body);
+    assert.equal(second.json().file.id, first.json().file.id);
+    assert.equal(await env.db.files.count({ where: { owner_id: user.id, name: "twice.txt" } }), 1);
+    assert.equal(await storageUsed(env, user.id), 5n);
+  });
+
+  test("a completion retried while the first is still running gets a retryable 409", async () => {
+    const { cookie } = await createUserAndLogin(env);
+    const sid = await initSession(cookie, 1);
+    // Model "first completion has claimed the session but not yet created the file".
+    await env.db.upload_sessions.update({ where: { id: sid }, data: { status: "complete" } });
+    const res = await api(env, cookie).post(`/files/upload-sessions/${sid}/complete`, {});
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.json().error.code, "UPLOAD_IN_PROGRESS");
+  });
+
+  test("an aborted session still answers 404 on complete", async () => {
+    const { cookie } = await createUserAndLogin(env);
+    const sid = await initSession(cookie, 1);
+    assert.equal((await api(env, cookie).delete(`/files/upload-sessions/${sid}`)).statusCode, 204);
+    assert.equal((await api(env, cookie).post(`/files/upload-sessions/${sid}/complete`, {})).statusCode, 404);
+  });
+});
