@@ -1,0 +1,132 @@
+# Architecture
+
+## System overview
+
+```
+ Browser
+   │  same-origin requests (session cookie)        presigned GET (file bytes)
+   ▼                                                        │
+ Next.js frontend (web/, :3001)                             │
+   │  rewrite /api/v1/* → BACKEND_URL                       │
+   ▼                                                        ▼
+ Fastify backend (src/, :3000) ───── minio SDK ──────►  MinIO (:9000)
+   │  Prisma / raw SQL                                   bucket "dbase" (SSE-S3)
+   ▼                                                     buckets "dbase-backup-<ts>"
+ Supabase Postgres (pooler :6543)
+   ▲
+   └── scripts/migrate.ts applies supabase/migrations/*.sql
+```
+
+There are three runtime services plus a one-shot init container (`docker-compose.yml`):
+
+| Service | Role |
+|---|---|
+| `backend` | Fastify API and all background workers, as one Node process |
+| `frontend` | Next.js standalone server. Serves the UI and reverse-proxies `/api/v1/*` |
+| `minio` | Object storage for file bytes, upload parts and thumbnails |
+| `minio-init` | Creates the `dbase` bucket and enables SSE-S3 default encryption, then exits |
+
+Postgres is external (Supabase). The stack does not run its own database.
+
+## Backend components
+
+`src/server.ts` builds one Fastify instance and does the following:
+
+1. Registers the cookie and rate-limit plugins. The rate limit is global (300 req/min), keyed by a SHA-256 of the session cookie, falling back to the client IP.
+2. Adds a raw `application/octet-stream` body parser for upload parts, with `bodyLimit` raised to 10 MB.
+3. Installs a single error handler that maps `AppError` → `{ error: { code, message } }`, schema-validation errors → `400 VALIDATION_ERROR`, and anything else → `500 INTERNAL_ERROR`.
+4. Registers each module's route plugin, then starts the three workers.
+
+### Domain modules (`src/modules/*`)
+
+| Module | Responsibility |
+|---|---|
+| `accounts` | Register, email verification, login/logout, sessions, password change/reset, profile, storage usage |
+| `filesystem` | Folders (create, rename, move, trash, list, zip), files (rename, move, trash, download/preview URLs), chunked uploads |
+| `access` | `checkPermission()` / `resolveEffectiveRole()`, permission grants, ownership transfer, share links (authenticated and public) |
+| `trash` | Trash listing, restore, "delete forever", deletion-queue processing |
+| `organize` | Favorites and per-user colored tags |
+| `search` | Case-insensitive name search over owned and directly-shared items |
+| `thumbnails` | Thumbnail queue and generation (`sharp`, `ffmpeg`, `pdftoppm`) |
+| `lifecycle` | Account deactivate, reactivate and delete (with ownership reassignment) |
+| `admin` | User management, quotas, roles, system storage limit, stats, activity log, failed jobs, MinIO backup/restore, outbound email |
+| `email` | Inbound Resend webhook (Svix signature verification) and storage of received mail |
+| `storage` | The only module that touches MinIO: part upload/compose, presigned URLs, streams, backups |
+
+Each module follows the same layout: `routes.ts` (HTTP and schema validation), `*-service.ts` (business logic) and `errors.ts` (factory functions that return `AppError`s with stable codes).
+
+### Two enforced boundaries
+
+- **Authorization:** every module calls `access/permission-check.ts#checkPermission(userId, itemType, itemId, requiredRole)`. It resolves the highest role from a direct grant or from any ancestor folder (it walks `folders.materialized_path`). Grants whose `granted_by` user is deactivated are ignored. Admins short-circuit to `true`. When access is denied, the route returns a 404-style `*_NOT_FOUND` rather than 403, so the item's existence isn't leaked.
+- **Storage:** only `storage/client.ts` builds MinIO clients or touches `storage_key`/`thumbnail_key`. It uses two clients: an internal one (`MINIO_ENDPOINT`, for I/O) and a public one (`MINIO_PUBLIC_ENDPOINT`, only for signing presigned URLs the browser will load). The region is pinned to `us-east-1` so presigning never makes a network call.
+
+### Background workers (`src/workers/*`)
+
+All workers use `setInterval` with an in-memory "tick in progress" flag so ticks never overlap.
+
+| Worker | Interval | Work |
+|---|---|---|
+| `upload-session-cleanup` | 5 min | Abort `pending` upload sessions past `expires_at`, credit the bytes back to the quota, remove temp parts |
+| `deletion-queue` (drain) | 1 min | Claim pending `deletion_queue` rows (`FOR UPDATE SKIP LOCKED`), delete the objects, retry up to 5 times, then mark `failed` |
+| `deletion-queue` (scan) | 1 h | Enqueue trashed items older than `TRASH_RETENTION_DAYS` (30) |
+| `thumbnail-queue` | 30 s | Claim pending `thumbnail_queue` rows, generate a 320px JPEG, retry up to 3 times |
+
+## Key flows
+
+### Authentication
+
+1. `POST /auth/register` creates the user with `email_verified=false` and emails a verification link (`PUBLIC_APP_URL/verify-email?token=…`). Only the SHA-256 hash of the token is stored.
+2. `POST /auth/verify-email` flips `email_verified`. A DB trigger (migration `0022`) allocates the user's quota out of the system storage limit at this point.
+3. `POST /auth/login` checks the bcrypt hash, then `is_active`, then `email_verified`, in that order, so a wrong password looks identical either way. It creates a `sessions` row and sets the `dbase_session` httpOnly, `secure`, `SameSite=Lax` cookie.
+4. Every protected route runs `requireSession` as a `preHandler`. It hashes the cookie, loads the session and its user, and rejects the request if the session is revoked or expired or the user is deactivated.
+
+### Chunked upload
+
+```
+POST /files                                  → upload_sessions row (pending, expires in 60 min)
+PUT  /files/upload-sessions/:id/parts/:n     → atomic quota credit, then MinIO tmp/<id>/part-NNNNNN
+POST /files/upload-sessions/:id/complete     → files row, MinIO composeObject → files/<random>,
+                                               owner permission, thumbnail enqueue, audit log
+```
+
+- The client (`web/lib/uploads.tsx`) sends 5 MB chunks, runs at most 3 uploads concurrently and retries on 429 using `Retry-After`.
+- Quota is charged per part with a single conditional `UPDATE users … WHERE used + delta <= quota RETURNING`, so concurrent parts can't overshoot. A system-wide trigger raises `SYSTEM_STORAGE_LIMIT_EXCEEDED` on top of that.
+- Parts are idempotent: re-sending a part that was already recorded is a no-op.
+- The destination folder and name are re-validated on every part and on completion.
+
+### Downloads and previews
+
+The backend never streams single files. `GET /files/:id/download|preview|thumbnail` checks permission and returns a short-lived presigned MinIO URL that the browser loads directly. Folder zips are the exception: `archiver` streams them through Fastify straight from MinIO object streams, without temp files.
+
+### Sharing
+
+- **Direct grants:** these are rows in `permissions` (`owner`/`editor`/`viewer`). Folder grants apply to the whole subtree dynamically.
+- **Share links:** these store a random token, a role, an optional bcrypt password and an optional expiry. Public routes under `/api/v1/public/share-links/:token` need no session. They resolve the link, check that its creator is still active, rate-limit password attempts (10 per 15 min) and keep folder browsing confined to the shared subtree.
+
+### Trash and deletion
+
+Trashing sets `deleted_at`. Restoring clears it, as long as the item isn't already mid-purge. "Delete forever" and the 30-day scan both enqueue into `deletion_queue`, which the drain worker processes asynchronously, removing objects and crediting quota. Rows that keep failing show up in the admin "Failed jobs" page.
+
+## Database interaction
+
+- **DDL source of truth:** `supabase/migrations/0001…0022.sql`, applied by `scripts/migrate.ts`, which records each applied file in `_migrations`. `prisma/schema.prisma` is used only to generate a typed client. `prisma migrate` and `db push` must never be run.
+- **Constraints the database enforces:**
+  - Per-user quota: a `CHECK` plus a trigger.
+  - System storage limit and pre-allocation (`0015`, `0022`).
+  - Exactly one owner per item, through a deferrable constraint on the generated `owner_scope` column.
+  - The last remaining active admin can't be deleted, demoted or deactivated (`LAST_ADMIN`).
+  - Unique live names per folder.
+- **Stored procedures:** `delete_account()` and `transfer_ownership()` (`0008`) perform multi-table ownership changes atomically.
+- **Concurrency:** folder moves take `pg_advisory_xact_lock` on (subtree root, target parent) in sorted order, then re-run the cycle check inside the lock. Only transaction-scoped advisory locks are used, which is why the Supavisor transaction pooler (`:6543`) is safe for everything.
+- **Search:** `ILIKE '%term%'` backed by `pg_trgm` GIN indexes (`0009`, moved to the `extensions` schema in `0014`).
+- **RLS:** enabled on every table with zero policies (`0010`). The app connects with a role that bypasses RLS, so this only blocks the public Supabase API from reaching the tables.
+
+## Frontend
+
+- **Routes:** Next.js App Router under `web/app`:
+  - `(auth)`: login, register, verify-email, password reset.
+  - `(app)`: authenticated shell with sidebar, quota indicator, upload tray and the admin section.
+  - `s/[token]`: public share-link viewer.
+- **API access:** `web/lib/api-client.ts` is the only place that issues API requests. It sends `credentials: "include"`, parses the `{ error: { code, message } }` envelope into `ApiError`, and sends every `UNAUTHENTICATED` response to a single redirect-to-login handler registered by `AuthProvider`.
+- **Server state:** handled by TanStack Query (`staleTime` 30 s), with keys centralized in `web/lib/query-keys.ts`.
+- **Proxy:** `/api/v1/*` is proxied by a `next.config.js` rewrite, not a route handler, so the cookie is forwarded untouched. The rewrite target is baked in at `next build` time from `BACKEND_URL`.

@@ -1,0 +1,99 @@
+# Usage guide
+
+This guide assumes the stack is running and an admin has been bootstrapped (see [installation.md](installation.md)). The UI is at `http://localhost:3001` by default.
+
+## Accounts
+
+1. **Register** at `/register`. Passwords need at least 8 characters.
+2. **Verify.** Click the link in the verification email. Without `RESEND_API_KEY` the email isn't sent; copy the link from the backend log instead:
+   ```bash
+   docker compose logs backend | grep -A5 "\[email\]"
+   ```
+   The link expires after `EMAIL_VERIFICATION_TTL_HOURS` (24 h). You can request a new one from the login page or by registering again with the same email.
+3. **Log in** at `/login`. Sessions last `SESSION_TTL_DAYS` (30).
+4. **Manage your account:**
+   - `/settings/account`: change display name or password, or delete the account. When you delete it, your files are transferred to the oldest active admin.
+   - `/settings/sessions` (sidebar "Devices"): view and revoke individual sessions.
+5. **Forgot password:** use `/password-reset/request`. The reset link expires after 30 minutes and signs you out everywhere.
+
+## Files and folders
+
+- **My Files** (`/folders`) is your root, and `/folders/<id>` is a subfolder. Breadcrumbs show the full ancestor chain.
+- **Upload:** drag and drop files, or whole folders, onto the browser. The bottom-right upload tray shows per-file progress with pause, resume and cancel. Large drops are queued, 3 uploads at a time.
+- **Row actions:**
+  - rename, move (a folder can't be moved into its own subtree)
+  - download (folders download as `.zip`), preview
+  - share, tags, favorite
+  - delete, which moves the item to trash
+- **Previews:** click an image, video, audio or PDF file to preview it inline. Thumbnails for images, videos and PDFs appear about 30 seconds after upload. If one never appears, generation failed for that format; this doesn't affect the file.
+- **Naming rules:**
+  - Names are case-sensitive but Unicode-normalized, so visually identical names collide.
+  - A name may be at most 255 bytes, and a full path at most 4096 bytes.
+  - Two live items in the same folder can't share a name.
+
+## Sharing
+
+Open **Share** on any item. You need editor access or higher on the item to share it.
+
+- **With a user:** enter their email (it must be a registered account) and pick `viewer` or `editor`. Sharing a folder shares everything inside it, including items added later. The recipient sees the item under **Shared with me**.
+- **With a link:** create a link with a role, an optional password and an optional expiry. Anyone with the URL `/s/<token>` can open it without an account. Folder links can be browsed and downloaded as a zip.
+- **Revoking:** remove a collaborator or revoke a link from the same dialog. Only a link's creator can revoke it.
+- **Transfer ownership:** the current owner can make another user the owner of an item.
+
+What viewers and editors can do:
+
+| | Viewer | Editor | Owner |
+|---|---|---|---|
+| View, download, preview | ✓ | ✓ | ✓ |
+| Rename, move, upload into folder, trash | | ✓ | ✓ |
+| Share (up to own role), create links | | ✓ | ✓ |
+| Transfer ownership | | | ✓ |
+
+## Organizing and finding
+
+- **Favorites** (`/favorites`): star items for quick access.
+- **Tags** (`/tags`): create personal colored tags, apply them from an item's menu and browse by tag. Tags are private to you.
+- **Search** (`/search`): partial, case-insensitive name search across your own items and items shared **directly** with you. Items you can only reach through a shared parent folder won't show up; open the folder instead.
+
+## Trash
+
+- Deleted items go to `/trash` and are purged automatically 30 days after deletion (`TRASH_RETENTION_DAYS`).
+- **Restore** puts an item back in its original location. This fails with `NAME_COLLISION` if a new item now uses that name, or `PURGE_IN_FLIGHT` if permanent deletion has already started.
+- **Delete forever** queues the item for immediate purge. Storage is credited back once the object is removed, usually within a minute.
+
+## Storage
+
+- The sidebar shows your usage against your quota. `/home` shows a breakdown by documents, images and videos.
+- An upload that would exceed your quota is rejected with `QUOTA_EXCEEDED` partway through, when the excess would occur. Bytes already uploaded for that file are credited back when it's canceled or expires.
+- `SYSTEM_STORAGE_LIMIT_EXCEEDED` means the whole system is full, not your account. Contact an admin.
+
+## Admin panel
+
+Admins see an extra sidebar section:
+
+| Page | Purpose |
+|---|---|
+| Users (`/admin/users`, `/admin/users/<id>`) | List users, change quota or role, deactivate or reactivate, delete (choosing who inherits their items), browse a user's files and storage breakdown |
+| Stats | System-wide usage and storage breakdown |
+| Activity | Audit log of uploads, shares, admin actions, backups and so on |
+| Storage Limit | Set the system-wide storage cap. User quotas are pre-allocated out of it, so the cap can't be set below the sum of verified users' quotas. |
+| Backup | Copy the whole `dbase` bucket into a new `dbase-backup-<timestamp>` bucket, or restore one. A restore overwrites matching keys only and never deletes newer objects. Limited to 3 runs per 10 minutes. |
+| Failed jobs | Deletion-queue items that failed 5 times |
+| Send Mail / Received Mail | Send email through Resend, and read inbound mail delivered to `EMAIL_INBOUND_ADDRESS` |
+
+Things to know:
+
+- **Deactivation** is reversible and changes no data. The user's sessions end immediately, their share links stop working, and shares they granted are suspended until reactivation.
+- **Last admin:** the last active admin can't be demoted, deactivated or deleted (`LAST_ADMIN`).
+- **Registration** returns `REGISTRATION_CLOSED` once the system limit is fully allocated. Raise the limit or lower quotas to reopen it.
+
+## Common errors
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Login says "Please verify your email" | Account not verified | Use the link from the email or backend log, or resend it |
+| Thumbnails or downloads fail to load for remote users | `MINIO_PUBLIC_ENDPOINT` still `localhost` | Set it to the host MinIO is reachable at from browsers |
+| Verification and reset links point to localhost | `PUBLIC_APP_URL` not set | Set it to the frontend's public URL |
+| Login "works" but you're immediately logged out on a remote host | Session cookie is `secure` and you're on plain HTTP | Serve the frontend over HTTPS |
+| Bulk upload slows to a trickle | Write rate limit (60/min) | Expected; the client retries automatically after `Retry-After` |
+| `NO_SYSTEM_ADMIN` when deleting an account | No other active admin to inherit items | Promote another admin first |

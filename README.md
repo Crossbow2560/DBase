@@ -1,97 +1,84 @@
-### DBase
+# DBase
 
-A file storage/sharing app: Fastify + Prisma backend, Next.js frontend, Postgres via Supabase, and MinIO for object storage.
+## 📚 Documentation
+| | |
+|---|---|
+| [⚙️ Architecture](docs/architecture.md) | System design, components and flow |
+| [📁 Structure](docs/structure.md) | Project organization and responsibilities |
+| [🚀 Installation](docs/installation.md) | Requirements and steps to run the project |
+| [🧠 Technical decisions](docs/decisions.md) | Trade-offs and design justifications |
+| [📖 Usage guide](docs/usage.md) | How to use the project, flows and examples |
+| [🔌 API](docs/api.md) | Endpoints, request/response and examples |
+| [🧪 Testing](docs/testing.md) | How to run tests and coverage strategy |
 
-- `src/` — backend (Fastify, port `3000`)
-- `web/` — frontend (Next.js, port `3001`)
-- `prisma/` — Prisma schema (models the DB; `supabase/migrations/` is the source of truth for DDL)
-- `scripts/bootstrap-admin.ts` — one-time script to create the first admin account
+The original design documents are kept alongside these: [REQUIREMENTS.md](docs/REQUIREMENTS.md), [DESIGN.md](docs/DESIGN.md), [APPLICATION_DESIGN.md](docs/APPLICATION_DESIGN.md), [FRONTEND_DESIGN.md](docs/FRONTEND_DESIGN.md), [IMPLEMENTATION_PHASES.md](docs/IMPLEMENTATION_PHASES.md).
 
-See [APPLICATION_DESIGN.md](APPLICATION_DESIGN.md), [REQUIREMENTS.md](REQUIREMENTS.md), [FRONTEND_DESIGN.md](FRONTEND_DESIGN.md), and [IMPLEMENTATION_PHASES.md](IMPLEMENTATION_PHASES.md) for the full design.
+---
 
-## Prerequisites
+## Description
 
-- A Supabase project (Postgres database) — this app does not run its own Postgres
-- Docker + Docker Compose, **or** Node.js 18+ (backend) and Node.js 22+ (frontend) with a locally running MinIO for a non-Docker setup
+DBase is a self-hosted file storage and sharing app, similar to a small Google Drive.
 
-## Setup
+- **What it does:** users upload files into nested folders and share them with other users (viewer/editor roles, inherited through folders) or through public links that can have a password and an expiry. It also covers favorites, tags, search, trash with 30-day retention, thumbnails and inline previews, and zip downloads of folders.
+- **What problem it solves:** it gives you a private, multi-user file store on your own hardware. File bytes stay in your own MinIO instance, metadata lives in Postgres, and per-user and system-wide storage quotas are enforced by the database.
+- **Real use case:** a single Ubuntu host runs the whole stack with Docker Compose. A GitHub Actions self-hosted runner redeploys it on every push to `main`. An admin manages users, quotas, the system storage limit, MinIO backups and restores, the audit log and outbound/inbound email from the admin panel.
 
-1. Clone the repo and copy the env template:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Fill in `.env`. This is the **single config file for the whole app** — backend, frontend, and docker-compose all read it (there's no separate `web/.env.local` anymore):
-   - `DATABASE_URL` / `DIRECT_URL` — from your Supabase dashboard under **Project Settings → Database → Connection string**. `DATABASE_URL` must be the pooled (port 6543) connection string — this is what the running app and `npm run migrate` both use. `DIRECT_URL` must be the direct (port 5432) one, used for `prisma db pull`/`prisma generate`; note it only accepts IPv6, so it won't work as a fallback for `npm run migrate` on an IPv4-only host.
-   - `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` — credentials for the MinIO container.
-   - `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` — set these to the same values as `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` (only needed when running the backend outside Docker; Docker Compose maps them automatically).
-   - `PORT` / `FRONTEND_PORT` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` — change any of these if the default collides with something else already running on the machine (another app, another MinIO instance, etc). Each one drives both the container's internal port and its published host port, so one number is all you need per service.
-   - Leave the other defaults unless you have a reason to change them.
-
-3. Apply the database schema. This app **does not use `prisma migrate`** — the schema lives in `supabase/migrations/`, applied via `scripts/migrate.ts` (`npm run migrate`), a plain SQL runner that tracks what it's already applied in a `_migrations` table so re-running it is a no-op once caught up. `.github/workflows/deploy.yml` runs this automatically on every deploy; for local setup, run it once yourself, then generate the Prisma client against the now-up-to-date database:
-
-   ```bash
-   npm install
-   npm run migrate
-   npm run prisma:generate
-   ```
-
-## Run with Docker (recommended)
+## Quick start
 
 ```bash
-docker compose up --build
-```
-
-This starts three services, on whatever ports `.env` configures (defaults shown):
-
-| Service    | URL                              |
-|------------|-----------------------------------|
-| frontend   | http://localhost:3001 (`FRONTEND_PORT`) |
-| backend    | http://localhost:3000 (`PORT`)   |
-| MinIO API  | http://localhost:9000 (`MINIO_PORT`) |
-| MinIO console | http://localhost:9001 (`MINIO_CONSOLE_PORT`) |
-
-The `minio-init` one-shot container creates the `dbase` bucket automatically on first run.
-
-Create the first admin account:
-
-```bash
+cp .env.example .env          # fill in DATABASE_URL, DIRECT_URL, MinIO creds, MINIO_KMS_SECRET_KEY
+npm install
+npm run migrate               # apply supabase/migrations/*.sql
+npm run prisma:generate
+docker compose up --build -d
 docker compose exec backend npm run bootstrap:admin -- --email=admin@example.com --password=changeme123 --name="System Admin"
 ```
 
-## Run without Docker
+Open http://localhost:3001 and log in as the admin.
 
-Backend:
+## Technologies used
 
-```bash
-npm install
-docker compose up minio minio-init   # or run a local MinIO some other way
-npm run prisma:generate
-npm run dev                          # http://localhost:3000
+| Layer | Stack |
+|---|---|
+| Backend | Node.js 22, TypeScript (ESM), Fastify 5, `@fastify/cookie`, `@fastify/rate-limit` |
+| Data access | Prisma 6 (client only, no Prisma migrations), `pg` for the migration runner |
+| Database | Supabase Postgres (`pg_trgm`, triggers, advisory locks, RLS enabled) |
+| Object storage | MinIO (S3-compatible), SSE-S3 encryption at rest with the built-in KMS key |
+| Media | `sharp` (images), `ffmpeg` (video frames), `poppler-utils` (PDF pages), `archiver` (zip streaming) |
+| Auth | bcryptjs password hashing, opaque session tokens (SHA-256 hashed) in an httpOnly cookie |
+| Email | Resend REST API (outbound), Svix-signed Resend webhooks (inbound) |
+| Frontend | Next.js 15 (App Router, standalone output), React 19, TanStack Query 5, Tailwind CSS, Radix UI, lucide-react |
+| Infra | Docker Compose (backend, frontend, minio, minio-init), GitHub Actions on a self-hosted runner |
+
+## Quick installation
+
+1. `cp .env.example .env` and fill in the Supabase connection strings and the MinIO secrets.
+2. `npm install && npm run migrate && npm run prisma:generate`
+3. `docker compose up --build`, then bootstrap the first admin.
+
+Full guide: [docs/installation.md](docs/installation.md).
+
+## Architecture (summary)
+
+The backend is a single Fastify process split into domain modules: `accounts`, `filesystem`, `access`, `trash`, `organize`, `search`, `admin`, `lifecycle`, `email`, `thumbnails` and `storage`. In-process `setInterval` workers handle upload-session cleanup, the deletion queue and thumbnail generation. Every authorization decision goes through `access/permission-check.ts`, and every object-store call goes through `storage/client.ts`. The browser only ever talks to the Next.js origin, which proxies `/api/v1/*` to the backend, and file bytes are fetched straight from MinIO through presigned URLs. Invariants that must hold under concurrency (quotas, one owner per item, last admin) are enforced by Postgres triggers and constraints, not just by app code.
+
+Details: [docs/architecture.md](docs/architecture.md).
+
+## Project structure
+
+```
+.
+├── src/                 # Fastify backend
+│   ├── server.ts        # bootstrap: plugins, error handler, routes, workers
+│   ├── modules/         # one folder per domain (routes + services + errors)
+│   ├── workers/         # setInterval background jobs
+│   └── lib/             # password, tokens, email helpers
+├── scripts/             # migrate.ts, bootstrap-admin.ts
+├── supabase/migrations/ # SQL source of truth for the schema
+├── prisma/              # schema.prisma (client generation only)
+├── web/                 # Next.js frontend
+├── docs/                # documentation
+└── docker-compose.yml   # backend, frontend, minio, minio-init
 ```
 
-Bootstrap the first admin:
-
-```bash
-npm run bootstrap:admin -- --email=admin@example.com --password=changeme123 --name="System Admin"
-```
-
-Frontend (separate terminal):
-
-```bash
-cd web
-npm install
-npm run dev                          # http://localhost:3001
-```
-
-Note: outside Docker, the frontend's `/api/v1/*` proxy rewrite defaults to `http://localhost:<PORT>`, using the backend's `PORT` from the same `.env` — no separate config needed. `web/scripts/with-frontend-port.js` reads `FRONTEND_PORT` from the same file to pick the frontend's own port (defaults to 3001).
-
-## Building for production
-
-```bash
-npm run build      # backend -> dist/
-cd web && npm run build   # frontend -> .next/standalone
-```
-
-The frontend's API proxy target is baked in at build time via the `BACKEND_URL` build arg (see `web/Dockerfile` and `web/next.config.js`) — rebuild the frontend image if the backend's address changes.
+Details: [docs/structure.md](docs/structure.md).

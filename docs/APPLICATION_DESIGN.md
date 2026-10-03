@@ -1,403 +1,902 @@
-# Self-Hosted Cloud File Storage — Application Layer Design Document
+# DBase — Application Design Document
 
-**Status:** v6. v1 was reviewed once at the detail level (caught and fixed a broken DESIGN.md cross-reference and an over-broad admin activity-logging claim, §9). v2 revised the metadata-store hosting decision to Supabase-hosted PostgreSQL (§1.3, §1.3.1, §8) and received a high-level structural review pass (confirmed the Supabase change was genuinely threaded through, not just a header edit; surfaced and closed one real gap — DESIGN.md's still-open reconciliation/repair job wasn't picked up anywhere in the worker model, now addressed explicitly in §7.8). v3 records three owner decisions on previously-open items: backup/restore design is deliberately out of scope for this phase (§8.4 — the operator's future plan is to duplicate the object store at the database layer instead), multi-instance deployment is out of scope (§8.3 — single instance only), and general API rate limiting is now in scope (new §4.7), while login-attempt lockout specifically stays deferred per REQUIREMENTS.md. v4 corrects §1.3's Row-Level Security decision: RLS is now enabled (with zero policies) on every table as a deny-by-default backstop against Supabase's separate anon/authenticated PostgREST API surface, a path this document had not accounted for until implementation of the actual SQL migrations (`supabase/migrations/`) surfaced it — this does not change the application's own authorization model, since the app connects via the service_role key, which bypasses RLS unconditionally, leaving `access.checkPermission()` as the sole gate on all application traffic exactly as before. v5 adds `GET /api/v1/auth/me` (§4.2) — a gap surfaced while writing FRONTEND_DESIGN.md §6.2, not by a review pass of this document itself: nothing previously let a client re-establish the logged-in user after a page refresh without re-submitting credentials. v6 records two more owner decisions and the real bugs found operationalizing them: `GET /api/v1/users/me/storage` (§4.2) added as a deliberately separate route from `/auth/me`, since quota needs refreshing far more often than identity; and §8's deployment shape revised to Docker-on-Ubuntu (backend, frontend, and MinIO each their own container, orchestrated by a `docker-compose.yml`, Postgres deliberately excluded since Supabase hosts it externally) — which surfaced a real bug only found by actually running the built containers: `next.config.js`'s `rewrites()` bakes its backend URL in at Next.js *build* time, not runtime, so a Docker Compose `environment:` var had no effect and had to become a build argument instead (§8.1 has the full account). A full line-by-line adversarial pass (matching DESIGN.md's six-pass rigor) is still outstanding — see §10.
-**Related docs:** [REQUIREMENTS.md](./REQUIREMENTS.md) (product requirements — the *what*), [DESIGN.md](./DESIGN.md) (data model — the *data*), [IMPLEMENTATION_PHASES.md](./IMPLEMENTATION_PHASES.md) (build sequencing)
-**Scope:** Application architecture, API design, background job processing, and deployment/infrastructure shape. This document assumes DESIGN.md v7 and REQUIREMENTS.md v6 as settled source-of-truth and does not re-derive any data-model or product decision made there — it only adds the layer of *how the application is built* on top of that schema and those requirements.
+**Status:** v8 — rewritten from the code as built (2026-09-24). Every statement was derived from `src/`, `web/`, `scripts/`, `Dockerfile`s, `docker-compose.yml`, `.github/workflows/deploy.yml`, and `supabase/migrations/`. It replaces the earlier v7, which described a design that has since diverged from the code in many places.
+**Scope:** The running system: architecture, backend modules, HTTP API, authentication and authorization, the key mechanisms (uploads, moves, trash, quotas, sharing), background workers, the web client, deployment, configuration, security posture, and a requirements traceability matrix.
+**Related:** [DESIGN.md](./DESIGN.md) (database), [REQUIREMENTS.md](./REQUIREMENTS.md) (product requirements), [FRONTEND_DESIGN.md](./FRONTEND_DESIGN.md) (original client rationale; §10 below supersedes it where they differ), [IMPLEMENTATION_PHASES.md](./IMPLEMENTATION_PHASES.md) (original build sequencing).
 
----
-
-## 1. Purpose and Goals
-
-DESIGN.md deliberately excluded "application architecture, API design, and infrastructure deployment" from its scope (DESIGN.md §1, line 4). This document fills that gap: given the finalized entity model and the product requirements, how is the actual server built — what processes run, what API surface the client(s) call, how do background jobs execute, and how is the whole thing deployed for the single self-hosted server (or small cluster) shape both prior documents assume (REQUIREMENTS.md §7; DESIGN.md §1.3)?
-
-### 1.1 Functional goals of this document
-
-- Define the service's internal module boundaries, so the "shared access-check function" DESIGN.md repeatedly references (§3.7, §4.2) and other cross-cutting primitives (`transfer_ownership()`, the quota-update pattern, the cycle-detection lock) have one obvious home each, rather than being reinvented per endpoint.
-- Define the HTTP API surface: every endpoint needed to satisfy REQUIREMENTS.md §5, its request/response shape, its authentication/authorization requirements, and which DESIGN.md entities/constraints it touches.
-- Define how the five asynchronous mechanisms DESIGN.md specifies at the data level — DELETION_QUEUE, THUMBNAIL_QUEUE, the EFFECTIVE_PERMISSIONS rebuild queue, abandoned-UPLOAD_SESSIONS cleanup, and the 30-day trash purge — are actually executed as running code: what triggers them, what process they run in, how they're supervised, and what happens when they fail.
-- Define the deployment topology: what processes exist, how they talk to Postgres and MinIO, and how this composes into something operable on the single-server deployment shape.
-
-### 1.2 Explicit non-goals
-
-Matching DESIGN.md §1.2's approach of stating exclusions explicitly rather than leaving them to be inferred:
-
-- **No re-litigating any data model decision.** If DESIGN.md says PERMISSIONS uses a polymorphic `(item_type, item_id)` pair, this document uses that pair; it does not propose an alternative schema.
-- **No re-litigating any product requirement.** If REQUIREMENTS.md says tags are per-user, this document builds an API consistent with that; it does not question whether tags should be shared.
-- **No frontend/client design.** This document defines the API contract a client consumes, not the client itself (web UI framework, mobile app, CLI, etc.). REQUIREMENTS.md §3 already excludes a documented public/third-party API from scope — the API defined here is the system's own internal client-server contract, not a publicly documented product.
-- **No CI/CD pipeline design, observability/monitoring stack selection, or specific cloud-provider deployment instructions.** These are operational concerns downstream of the architecture defined here; §8 states the deployment *shape* (what processes, what they need) without prescribing a specific hosting provider or pipeline tool.
-- **No load testing or capacity planning numbers.** DESIGN.md and REQUIREMENTS.md both frame this as a self-hosted, non-SaaS-scale deployment; this document inherits that framing without attempting to quantify expected request volume.
-
-### 1.3 Technology assumptions
-
-- **Runtime/language:** Node.js with TypeScript. Chosen (system-owner specified) over Python/FastAPI or Go primarily for stack unification if the client is also JS/TS, and for TypeScript's ability to share type definitions for API request/response shapes between server and client without a separate schema-generation step.
-- **HTTP framework:** **Fastify**, not Express. Rationale, since the system owner left the specific framework open within "Node.js/TypeScript": Fastify has first-class JSON Schema-based request/response validation and serialization built in, which matters here because so much of REQUIREMENTS.md §5.12's error-feedback requirement and DESIGN.md's many precisely-specified constraints (quota vs. permission error distinction, path-length limits, name-collision errors) are naturally expressed as schema validation at the API boundary rather than ad hoc checks scattered through handlers. Fastify's built-in schema compilation is also materially faster than Express + a bolted-on validation middleware for a service that will validate on every request. This is a reversible choice — nothing in this document's architecture is Fastify-specific beyond the route-registration and schema-validation layer described in §4.
-- **Metadata store:** **Supabase-hosted PostgreSQL** (system-owner specified — supersedes DESIGN.md §1.3's generic "self-hosted PostgreSQL" framing for the *hosting* of the database only; every schema, constraint, and behavioral rule DESIGN.md specifies is unchanged, since Supabase is Postgres). The application connects through Supabase's connection pooler (Supavisor, transaction-pooling mode) for all traffic, including the raw-SQL, lock-sensitive operations in §5 — this is a deliberate choice, not an oversight, and is why DESIGN.md §3.3's `pg_advisory_xact_lock` requirement (transaction-scoped, not session-scoped, specifically because session-scoped locks are unsafe under transaction-mode pooling) is load-bearing here rather than a hypothetical concern; see §1.3.1 below for the full reasoning. **Supabase Auth is deliberately not used** — USERS/SESSIONS remain the custom tables DESIGN.md §3.1–§3.2 specifies, with this application's own password hashing and session model; Supabase is used purely as hosted Postgres, not as an identity provider. **Postgres Row-Level Security is enabled on every table, but with zero policies** (`supabase/migrations/0010_enable_rls.sql`) — this is narrower than it sounds and does not contradict the rest of this section. It exists solely as a deny-by-default backstop against a path this document had not accounted for until it was caught in review: Supabase auto-generates a PostgREST/GraphQL/Realtime API for every table in the `public` schema, reachable via the `anon`/`authenticated` keys *independently of this application's own Fastify API* — a path `access.checkPermission()` never sees and was never designed to gate, since this application never uses Supabase Auth or the `anon` key (previous paragraph). With RLS on and no policies defined, that separate path is denied by default for every table, which is exactly the correct state given nothing in this architecture is meant to use it. This is orthogonal to, not a replacement for, DESIGN.md §4.3's accepted-risk framing ("pure application-layer bypass has no database-level backstop"): the application itself connects using the Supabase **service_role** key, which is configured to bypass RLS unconditionally, so RLS is fully transparent to — and imposes zero authorization logic on — actual application traffic. The shared `access.checkPermission()` function (§3.3 below) remains the sole authorization gate for everything the application does; RLS's only job is closing off the separate anon-key surface, and it must never be used to encode any actual business-logic policy — a genuine future need for anon/authenticated access through Supabase's own API must be satisfied with an explicit, deliberately-written `CREATE POLICY`, never by disabling RLS again. Both this and the Auth decision are stated explicitly because Supabase makes both easy to reach for, and a future contributor unfamiliar with this reasoning could otherwise "helpfully" wire in Supabase Auth, or add RLS policies that duplicate/conflict with `access.checkPermission()`, silently diverging from DESIGN.md's specified model.
-- **Database access:** **Prisma** as the primary ORM/query builder for standard CRUD paths (USERS, FOLDERS, FILES, TAGS, FAVORITES, and read paths generally), with **raw parameterized SQL for a specific, deliberately small set of operations** where Prisma's abstractions would fight the design rather than help: the cycle-detection advisory lock (`pg_advisory_xact_lock`), the deferred-constraint ownership transfer, the atomic conditional quota update, and the EFFECTIVE_PERMISSIONS synchronous-fallback resolution. §5 lists exactly which operations require raw SQL and why. This mirrors DESIGN.md's own pattern of using the right tool per-mechanism (e.g., a `BEFORE UPDATE` trigger for quota, a plain `UNIQUE` constraint for owner uniqueness) rather than forcing one abstraction to cover every case.
-- **Blob storage:** **MinIO**, self-hosted separately from Supabase (system-owner specified — Supabase's own Storage product, which itself is a managed layer over S3-compatible buckets, is deliberately not used, to keep a single, self-operated object store rather than splitting blob storage across two providers). The official MinIO JS SDK (S3-compatible) is used, only inside the storage-access module (§4.4) — no other module talks to MinIO directly, so `storage_key` non-guessability and bucket-policy assumptions (DESIGN.md §3.4, §4.3) stay enforced in one place.
-- **Background job execution:** in-process async workers (system-owner specified — see §7.1 for the concrete mechanism and its trade-offs against a separate worker process, which DESIGN.md's queue-table design would equally support if this decision is revisited later).
-- **Deployment shape:** the application process (and MinIO) are self-hosted; the metadata store is Supabase-hosted rather than self-hosted Postgres — a hybrid shape this document treats as a variant of DESIGN.md §1.3's "single server (or small cluster)" framing, not a departure from its non-SaaS-scale assumptions. §8 details what this means concretely for process topology.
-
-#### 1.3.1 Why the transaction-mode pooler is safe here, not just tolerated
-
-DESIGN.md §3.3 (Pass 5, item 1) identifies the exact hazard: a *session*-scoped advisory lock (`pg_advisory_lock`) is tied to the physical backend connection, and a transaction-pooling connection pooler (PgBouncer, or Supabase's Supavisor in transaction mode) can hand that same backend connection to a different, unrelated request the moment the current transaction commits — so a session-scoped lock can leak or be silently dropped from under the code that thinks it still holds it. This is precisely Supabase's default pooling mode. DESIGN.md's own fix for this — `pg_advisory_xact_lock`, which is transaction-scoped and releases automatically at commit or rollback, with no explicit unlock call and no dependency on which physical connection later reuses the backend — was already specified for exactly this reason, independent of which pooler ends up in front of Postgres. Because §5.1 below already commits to `pg_advisory_xact_lock` (never the session-scoped variant) for the cycle-detection lock, and no other mechanism in this document takes an advisory lock, session-mode pooling was never required in the first place — routing every connection, including the lock-sensitive ones, through Supabase's transaction-mode pooler is safe as designed, not merely acceptable as a compromise. The one discipline this places on implementation: **no code path may ever call `pg_advisory_lock`/`pg_advisory_unlock` (the session-scoped functions) anywhere in this codebase** — only `pg_advisory_xact_lock`, enforced by code review, since Postgres itself won't stop a session-scoped call from being added later by someone unaware of this constraint.
+**Conventions.** "As built" flags behavior that differs from REQUIREMENTS.md or from the original intent. §17 lists every such gap, ranked. Code references are relative to the repository root.
 
 ---
 
-## 2. Design Process
+## Table of contents
 
-This document is being drafted as a v1, single-pass initial design — explicitly *not* claiming the adversarial-review maturity DESIGN.md reached after six passes. The system owner's instruction was to match DESIGN.md's rigor as a target, not to falsely claim it has already been achieved. Concretely, this means:
-
-- Every architectural decision below states its rationale and, where a real alternative existed, why it was rejected — the same "why does this exist" discipline DESIGN.md uses, so a future review pass can evaluate the reasoning rather than just the conclusion.
-- Known open questions and risks are surfaced explicitly in §10 (mirroring DESIGN.md §7's "Open Items") rather than glossed over.
-- This document should go through the same kind of fresh-eyes adversarial review DESIGN.md did before implementation begins in earnest — checking cross-references against REQUIREMENTS.md and DESIGN.md for gaps, checking each fix/decision against the others for regressions, and specifically re-examining anything marked as an open question below.
-
----
-
-## 3. Service Architecture Overview
-
-### 3.1 Single deployable, internally modular
-
-The application is one deployable Node.js service (not a set of independently deployed microservices) containing three logical layers:
-
-1. **The API layer** — Fastify route handlers, one per REQUIREMENTS.md §5 capability, responsible only for request validation, calling into the domain layer, and shaping the response. Route handlers must not contain business logic themselves (see §3.3's rationale).
-2. **The domain layer** — a set of modules, one per DESIGN.md entity cluster (mirroring IMPLEMENTATION_PHASES.md's subcomponent boundaries almost exactly, since that document already did the work of partitioning DESIGN.md's entities into independently-reasoned-about groups), each owning the business rules, constraints, and multi-step operations for its cluster.
-3. **The background worker layer** — the in-process async tasks that drive DELETION_QUEUE, THUMBNAIL_QUEUE, the EFFECTIVE_PERMISSIONS rebuild queue, UPLOAD_SESSIONS cleanup, and the 30-day trash purge (§7).
-
-A single deployable was chosen over a microservices split for the same reason DESIGN.md gives for choosing a simpler design across many of its own decisions (e.g., a `role` column instead of an `ADMIN_ROLES` table, §4.2): the deployment target is a single self-hosted server, not a distributed SaaS. Splitting into separately-deployed services would add network calls, separate deployment/versioning coordination, and distributed-transaction concerns (e.g., the move-authorization check in §5.3 needs a consistent view across FOLDERS/FILES and PERMISSIONS in one transaction) with no corresponding benefit at this scale. This can be revisited if the deployment target ever changes — nothing about the domain-layer module boundaries below prevents extracting one later into its own service.
-
-### 3.2 Domain modules (mirrors IMPLEMENTATION_PHASES.md's subcomponent split)
-
-| Module | Owns (DESIGN.md entities) | Primary responsibility |
-|---|---|---|
-| `accounts` | USERS, SESSIONS | Registration, login/logout, session management, password reset, quota trigger logic, admin-demotion-safety check (REQUIREMENTS.md §4) |
-| `filesystem` | FOLDERS, FILES, UPLOAD_SESSIONS | Create/rename/move/list, multipart upload orchestration, cycle detection, path-length/name-normalization enforcement |
-| `access` | PERMISSIONS, EFFECTIVE_PERMISSIONS, SHARE_LINKS | The shared access-check function, granting-authority checks, `transfer_ownership()`, public link resolution and password throttling |
-| `trash` | soft-delete fields on FOLDERS/FILES, DELETION_QUEUE | Trash/restore, immediate-purge request, the purge worker |
-| `organization` | FAVORITES, TAGS, ITEM_TAGS | Favorite/unfavorite, tag CRUD, tag-application, lazy-prune-on-read |
-| `previews` | THUMBNAIL_QUEUE, `FILES.thumbnail_status`/`thumbnail_key` | Thumbnail job enqueue, generation worker, restore-triggered regeneration |
-| `admin` | (reads across all modules) | Admin-only endpoints; does not own tables, calls into other modules' domain functions with the admin-bypass flag set |
-| `audit` | ACTIVITY_LOG | The single write path every other module calls to log an action; also serves admin usage-frequency queries |
-| `storage` | (no DB entity — wraps MinIO) | The only module permitted to construct or dereference a `storage_key`/`thumbnail_key` against the object store |
-
-This mapping is deliberately the same partition IMPLEMENTATION_PHASES.md already uses for build sequencing (§2 there), for a specific reason: keeping the module boundary and the build/ownership boundary identical means a team following IMPLEMENTATION_PHASES.md's dependency graph is, without extra translation, also respecting this document's module boundaries — there's no risk of the two documents implying different decompositions of the same system.
-
-**Deviation from IMPLEMENTATION_PHASES.md's grouping:** that document groups "Admin & Audit" as one subcomponent (#6). This document splits it into two modules (`admin`, `audit`) because they have different callers and different natures — `audit` (ACTIVITY_LOG) is written to by nearly every other module on every mutating action, while `admin` is a thin layer of admin-only endpoints that mostly delegate into other modules with a bypass flag. Treating them as one module risked every module importing "the admin module" just to get audit logging, which inverts the intended dependency direction (§3.3).
-
-### 3.3 Dependency direction and the shared access-check function
-
-Modules depend downward only, in this order: `storage` and `audit` (leaf modules, no dependencies on other domain modules) → `accounts` → `filesystem` → `access` → `trash`/`organization`/`previews` (parallel) → `admin`. This mirrors IMPLEMENTATION_PHASES.md §2's dependency graph (Foundation → Core Filesystem → Permissions & Sharing → Trash/Favorites-Tags/Thumbnails → Admin & Audit → Account Lifecycle) exactly — DESIGN.md itself does not describe a module-layering order (its §4 covers only the admin feature's requirements and design decisions, not a dependency graph), so the layering claim here is credited to IMPLEMENTATION_PHASES.md alone, not DESIGN.md.
-
-The one function every module above `access` calls into — and the one piece of this architecture with the highest correctness stakes — is `access.checkPermission(userId, itemType, itemId, requiredRole)`. Per DESIGN.md §3.7 and §4.2, this single function must:
-
-1. Short-circuit to `true` if the acting user's `role = 'admin'` (the admin bypass, DESIGN.md §4.2) — but only for the specific set of operations REQUIREMENTS.md actually grants admins blanket access to (view, and permission/quota/lifecycle changes); it must **not** be used to bypass the granting-authority check in DESIGN.md §3.6, which has its own narrower exemption list (§5.4.2 below).
-2. Otherwise attempt EFFECTIVE_PERMISSIONS first (the fast path).
-3. Fall back to a synchronous, on-demand recomputation from PERMISSIONS (walking the folder ancestor chain) if the cache row is missing, or if the call site is flagged as security-sensitive (DESIGN.md §3.7's explicit requirement that the cache is never the sole source of truth).
-
-**Why this must be one function, not one-per-module:** DESIGN.md §4.2 states the admin bypass "lives in one shared access-check function... so it's applied consistently rather than re-implemented per endpoint," and separately warns (§4.3) that a forgotten check on any new code path grants unauthenticated-equivalent access, not merely admin-level access, since there is no database-level backstop. Given that risk profile, this document's single highest architectural rule is: **no domain module, route handler, or worker may query PERMISSIONS or EFFECTIVE_PERMISSIONS directly for an authorization decision.** Every authorization decision — including inside the `filesystem` module's own move-authorization check, `organization`'s favorite/tag write checks, and `previews`' generation gating — must call `access.checkPermission()`. This is enforced procedurally (code review checklist, §10 open item) rather than by a language-level access control mechanism, since TypeScript has no way to prevent one module's code from importing another module's Prisma client.
+1. Purpose and scope
+2. System architecture
+3. Technology stack
+4. Backend architecture
+5. Authentication and sessions
+6. Authorization
+7. HTTP API reference
+8. Key mechanisms
+9. Background workers
+10. Web client
+11. Deployment and operations
+12. Configuration reference
+13. Security considerations
+14. Observability and operations
+15. Testing
+16. Requirements traceability
+17. Known gaps and open items
+18. Appendix: repository layout
 
 ---
 
-## 4. API Design
+## 1. Purpose and scope
 
-### 4.1 Conventions
+DBase is a self-hosted, multi-user cloud file store, comparable to a small Dropbox or Nextcloud. Users get private quota-limited storage with nested folders, resumable uploads, sharing (to individuals and by public link), favorites, private tags, previews, and a recoverable trash. Admins get oversight tooling.
 
-- **Style:** REST-ish JSON over HTTPS. Not a formally documented/versioned public API (REQUIREMENTS.md §3 excludes this from scope) — internal contract between this service and its own client(s), but designed cleanly enough that documenting it publicly later would be a documentation exercise, not a redesign.
-- **Base path:** `/api/v1/...`. A version prefix is included from day one even though REQUIREMENTS.md doesn't require a public API, because it costs nothing now and avoids an awkward migration if a documented API is added later (REQUIREMENTS.md §8, deferred future consideration).
-- **Auth:** every endpoint except registration, login, password-reset-request/confirm, and public share-link access requires a valid session, presented as an `httpOnly`, `Secure`, `SameSite=Lax` cookie carrying a reference to a SESSIONS row (not the raw refresh token — see §4.2). This is a deliberate choice over a bearer-token-in-header pattern: since REQUIREMENTS.md explicitly excludes a documented third-party API (§3), there's no requirement to support non-browser API clients that would need header-based auth, and cookies avoid the XSS-exposure risk of storing a session token in client-accessible JS storage.
-- **Errors:** a consistent envelope — `{ "error": { "code": string, "message": string } }` — with HTTP status codes used semantically (400 validation, 401 unauthenticated, 403 unauthorized, 404 not found or not visible to this user — see the note on 403-vs-404 below, 409 conflict/collision, 422 quota/business-rule violation). REQUIREMENTS.md §5.12 requires the system to "distinguish at minimum between 'insufficient storage quota' and 'insufficient permission'" with a clear, specific reason — `error.code` values (`QUOTA_EXCEEDED`, `INSUFFICIENT_PERMISSION`, `NAME_COLLISION`, `PATH_TOO_LONG`, `NAME_TOO_LONG`, `CYCLE_DETECTED`, and so on, enumerated per-endpoint in §4.3) exist specifically to satisfy this requirement in a machine-checkable way, not just a human-readable `message` string that could drift or be inconsistently worded across endpoints.
-- **403 vs. 404 for permission failures on existing items:** when a user requests an item they have no access to at all (not even to know it exists), the API returns **404**, not 403 — returning 403 would confirm the item's existence to a user with zero access, a minor information-disclosure gap DESIGN.md doesn't address (it operates below the API layer) but which this document treats as a default policy for every item-scoped endpoint. When a user has *some* access but not enough for the specific action (e.g., a viewer attempting a write), the API returns **403** with `INSUFFICIENT_PERMISSION`, since the item's existence is already known to them.
-- **Pagination:** REQUIREMENTS.md §5.11 requires pagination on every unbounded listing. Cursor-based (opaque `nextCursor` token), not offset-based — chosen because several of these listings (trash, activity log) are backed by the partial/composite indexes DESIGN.md §5.4 defines specifically for ordered scans, and offset pagination degrades badly (and can skip/duplicate rows under concurrent writes) on exactly this kind of continuously-mutating, indexed-scan listing.
-- **Idempotency:** mutating endpoints that DESIGN.md or REQUIREMENTS.md describe as needing to tolerate retries (multipart upload part completion, share-link creation, favorite/tag application) accept an optional `Idempotency-Key` header; the server deduplicates using a short-lived key store rather than relying on the client never double-submitting. This is an application-layer safety net layered on top of DESIGN.md's own database-level idempotency guards (e.g., DELETION_QUEUE's partial unique index) — it does not replace them, since a client retry can still race with e.g. two different app-server instances in a way only the database constraint fully closes.
+The system is a Fastify HTTP API (`src/`), a Next.js web app (`web/`), Postgres on Supabase for metadata, and MinIO for file bytes. It is designed for **one operator, one host, one backend instance** (§11.4).
 
-### 4.2 Authentication and session endpoints (`accounts` module)
+### 1.1 Beyond REQUIREMENTS.md
 
-| Method & Path | Purpose | Notes |
-|---|---|---|
-| `POST /api/v1/auth/register` | Self-registration | Non-enumerating error on duplicate email (REQUIREMENTS.md §5.1); assigns default quota from system config; never accepts a `role` field from the client — admin is never self-grantable |
-| `POST /api/v1/auth/login` | Authenticate, start a session | Issues the session cookie; records `device_info` from `User-Agent` |
-| `GET /api/v1/auth/me` | Return the current session's user | **(Added — FRONTEND_DESIGN.md §6.2.)** Closes a real gap: nothing else lets a client re-establish who's logged in after a page refresh without re-submitting credentials, since `/login`'s response is the only other place the user object appears. Requires a valid session cookie; 401 `UNAUTHENTICATED` otherwise, same as every other session-gated endpoint here |
-| `GET /api/v1/users/me/storage` | Return the current user's `storage_used_bytes`/`storage_quota_bytes` | **(Added — owner decision.)** Deliberately a separate route from `/auth/me`, not a field bolted onto it: quota needs to be refreshed independently and far more often (after every upload/delete) than identity does, and coupling them would mean re-fetching/re-rendering auth state just to refresh a byte count. Values are returned as strings (`bigint` doesn't survive JSON serialization as a number without precision loss at the sizes this schema allows) |
-| `POST /api/v1/auth/logout` | End the current session only | Revokes exactly the current SESSIONS row |
-| `GET /api/v1/auth/sessions` | List this user's active sessions/devices | Powers a "manage your devices" UI |
-| `DELETE /api/v1/auth/sessions/:sessionId` | Revoke a specific other session | Lets a user log out one device remotely |
-| `POST /api/v1/auth/password-reset/request` | Start self-service password reset | Always returns 200 regardless of whether the email exists, same non-enumeration rationale as registration |
-| `POST /api/v1/auth/password-reset/confirm` | Complete password reset with a token | Invalidates all existing sessions for that user on success (a password reset is a reasonable signal to force re-login everywhere) |
+The following exist in the code but were out of scope in REQUIREMENTS.md, or deferred there:
 
-### 4.3 Filesystem endpoints (`filesystem` module, gated through `access`)
-
-| Method & Path | Purpose | Key checks (cited to source doc) |
-|---|---|---|
-| `GET /api/v1/folders/:id/contents` | List a folder's direct children (files + folders) | `access.checkPermission(..., 'viewer')`; paginated, default sort name-ascending, supports `sort=modified` (REQUIREMENTS.md §5.11) |
-| `POST /api/v1/folders` | Create a folder | Sibling-name collision → 409 `NAME_COLLISION`; NFC-normalize+trim before the uniqueness check (DESIGN.md §3.3); path-length check (REQUIREMENTS.md §5.2) |
-| `PATCH /api/v1/folders/:id` | Rename and/or move a folder | Rename: same collision/normalization rule. Move: full two-part authorization (DESIGN.md §3.3/§3.4, REQUIREMENTS.md §5.3) — editor-or-above on both source and destination, owner-only if the move would strip anyone else's access; cycle-detection advisory lock (§5.2 below); `materialized_path` subtree rewrite in the same transaction |
-| `DELETE /api/v1/folders/:id` | Soft-delete (trash) a folder and its subtree | Cascades `deleted_at` to the whole subtree in one transaction (DESIGN.md §5.2) |
-| `POST /api/v1/files` (multipart init) | Start a multipart upload session | Creates an UPLOAD_SESSIONS row with `target_folder_id`/`target_name`; pre-flight quota check |
-| `PUT /api/v1/files/upload-sessions/:id/parts/:partNumber` | Upload one part | Per-part quota increment (DESIGN.md §3.5); re-verify destination validity (REQUIREMENTS.md §5.3 concurrent-mutation guard) |
-| `POST /api/v1/files/upload-sessions/:id/complete` | Finalize a multipart upload | Final re-verification of destination/name/quota; transitions `upload_status` to `complete`; enqueues a THUMBNAIL_QUEUE job if `mime_type` qualifies |
-| `DELETE /api/v1/files/upload-sessions/:id` | Explicitly cancel an in-progress upload | Same cleanup procedure as expiry (DESIGN.md §3.5) |
-| `GET /api/v1/files/:id/download` | Request a download | Issues a short-lived, scoped download URL against `storage_key` after one authorization + `deleted_at IS NULL` check (DESIGN.md §3.4's download-time enforcement rule); the actual byte transfer happens directly against the object store using that URL, not proxied through this API |
-| `PATCH /api/v1/files/:id` | Rename and/or move a file | Same rules as folder rename/move |
-| `DELETE /api/v1/files/:id` | Soft-delete (trash) a file | |
-| `GET /api/v1/search` | Name search across owned + accessible items | Uses the `pg_trgm` GIN indexes (DESIGN.md §5.4); partial, case-insensitive; paginated, no mandated sort order beyond relevance (REQUIREMENTS.md §5.2, §5.11) |
-
-### 4.4 Sharing endpoints (`access` module)
-
-| Method & Path | Purpose | Key checks |
-|---|---|---|
-| `POST /api/v1/items/:type/:id/permissions` | Grant direct access to another user | Granting-authority check: acting user must be editor-or-above (DESIGN.md §3.6); role can be `viewer` or `editor` only, never `owner`; self-share and share-with-current-owner are no-ops (REQUIREMENTS.md §5.5), not errors |
-| `DELETE /api/v1/items/:type/:id/permissions/:userId` | Revoke a direct grant | Must trigger an immediate EFFECTIVE_PERMISSIONS rebuild enqueue (DESIGN.md §3.7) — but the revoking action's own subsequent reads must not rely on that rebuild having completed (REQUIREMENTS.md §5.5's "no acceptable delay" — enforced via the synchronous fallback, not by waiting on the async rebuild) |
-| `GET /api/v1/shared-with-me` | List items shared with the current user | Paginated (REQUIREMENTS.md §5.11); resolves through EFFECTIVE_PERMISSIONS/PERMISSIONS, not a separate materialized list |
-| `POST /api/v1/items/:type/:id/share-links` | Create a public share link | Same granting-authority check as direct grants (DESIGN.md §3.6); optional `password`, `expiresAt` |
-| `DELETE /api/v1/share-links/:id` | Revoke a share link | Only the creator (or an admin) may revoke |
-| `GET /api/v1/public/share-links/:token` | Anonymous access to a shared item | No session required; password-attempt throttling (DESIGN.md §3.8) applied here, keyed on the token itself, not the requester; joins `USERS.is_active` on `created_by` (DESIGN.md §3.8's deactivation-check) |
-| `POST /api/v1/items/:type/:id/transfer-ownership` | Transfer ownership | Only current owner or admin; routes through `transfer_ownership()` (§5.4.1) |
-
-### 4.5 Trash, favorites, tags, thumbnails (`trash`, `organization`, `previews` modules)
-
-| Method & Path | Purpose | Key checks |
-|---|---|---|
-| `GET /api/v1/trash` | List the current user's trashed items | Paginated, uses the owner-scoped partial index (DESIGN.md §5.4) |
-| `POST /api/v1/trash/:type/:id/restore` | Restore a trashed item | Must fail if a DELETION_QUEUE row already exists for it (DESIGN.md §5.2's restore-eligibility check); falls back to root-level restore per REQUIREMENTS.md §5.4 if the original parent is unavailable or still trashed |
-| `DELETE /api/v1/trash/:type/:id` | Permanently delete now ("delete forever") | Enqueues DELETION_QUEUE immediately, bypassing the 30-day window |
-| `POST /api/v1/items/:type/:id/favorite` | Favorite an item | Requires viewer-or-above (REQUIREMENTS.md §5.7) |
-| `DELETE /api/v1/items/:type/:id/favorite` | Unfavorite | |
-| `GET /api/v1/favorites` | List favorites | Lazy-prune-on-read (DESIGN.md §3.11) happens inside this handler |
-| `POST /api/v1/tags` | Create a tag | |
-| `POST /api/v1/items/:type/:id/tags/:tagId` | Apply a tag | Requires editor-or-above on the item (DESIGN.md §3.12) **and** `tag_id` ownership by the acting user (DESIGN.md §3.12 Pass 6 fix) |
-| `DELETE /api/v1/items/:type/:id/tags/:tagId` | Remove a tag | |
-| `GET /api/v1/files/:id/thumbnail` | Fetch a thumbnail | 404 if `thumbnail_status != 'ready'` or the file is trashed (REQUIREMENTS.md §5.9); otherwise a short-lived scoped URL, same pattern as file download |
-
-### 4.6 Admin endpoints (`admin` module)
-
-| Method & Path | Purpose | Key checks |
-|---|---|---|
-| `GET /api/v1/admin/users` | List all users, with usage stats | Admin-only. **Not** an ACTIVITY_LOG `view` trigger — REQUIREMENTS.md §5.10 requires logging only when an admin views another user's *file or folder contents*, not a roster/stats listing; logging every list-view here would over-log relative to that requirement |
-| `GET /api/v1/admin/users/:id/files` | Browse a specific user's files/folders | Admin bypass through `access.checkPermission`; logs `view` with `subject_user_id` set (DESIGN.md §3.9) |
-| `PATCH /api/v1/admin/users/:id/quota` | Change a user's quota | Rejects negative values (REQUIREMENTS.md §5.6); allowed to go below current usage |
-| `PATCH /api/v1/admin/users/:id/role` | Promote/demote admin | Rejects if this would leave zero admins (REQUIREMENTS.md §4) |
-| `POST /api/v1/admin/users/:id/deactivate` / `.../reactivate` | Toggle account deactivation | Deactivation: invalidate all sessions immediately, cascade-suspend shares (REQUIREMENTS.md §5.1) |
-| `DELETE /api/v1/admin/users/:id` | Admin-initiated account deletion | Routes through the full account-deletion procedure (§5.4.3, DESIGN.md §7 item #6) |
-| `DELETE /api/v1/users/me` | Self-service account deletion | Same procedure, forced to the default reassignment policy (REQUIREMENTS.md §5.1.1 — self-service cannot choose a specific replacement owner) |
-| `GET /api/v1/admin/stats` | System-wide storage/usage statistics | Aggregates `SUM(storage_used_bytes)`, labeled as an approximation (DESIGN.md §3.10) |
-| `GET /api/v1/admin/activity` | Query ACTIVITY_LOG | Paginated; admin-only view across all users |
-
-### 4.7 API rate limiting (owner-added, beyond REQUIREMENTS.md's original deferral)
-
-**Decision (owner-confirmed): general API rate limiting is in scope for this phase**, layered on top of everything else §4 defines, even though REQUIREMENTS.md §3/§8 frames rate limiting broadly as deferred and login-attempt lockout specifically stays deferred per §10 item 5. This section designs the mechanism; it is new relative to the rest of this document, not a restatement of something DESIGN.md or REQUIREMENTS.md already specifies.
-
-**Layer:** a Fastify plugin (`@fastify/rate-limit` or equivalent), registered globally at the API layer (§3.1), not inside individual domain modules — consistent with this document's existing pattern of keeping request-shaping concerns in the API layer and business logic in the domain layer (§3.1's three-layer split). This keeps rate limiting a property of *how a request reaches the domain layer*, not something each module has to remember to apply. **It is not a domain module and is deliberately absent from §3.2's module table** — it has no owned DESIGN.md entities and no business logic, only request-shaping, so it doesn't fit that table's "owns / responsibility" shape; noted here explicitly rather than left for the reader to infer why it's missing there.
-
-**Counter state storage — in-process memory, not Postgres.** Rate-limit counters are kept in the application process's own memory (the standard mode for `@fastify/rate-limit`), not written through Prisma or raw SQL — this is why §6's consolidated Prisma/raw-SQL list doesn't mention this mechanism at all; it uses neither. This choice is directly enabled by, and consistent with, §8.3's single-instance decision: in-memory counters would under-count (or simply not coordinate) across multiple processes, which is exactly the kind of state that breaks under multi-instance deployment. Because multi-instance is explicitly out of scope (§8.3), that failure mode is accepted as moot rather than needing a shared store (e.g., Redis) for counter state — but this is called out explicitly so that if the multi-instance decision is ever revisited, this rate-limiting design must be revisited in the same pass, not assumed to still work unchanged.
-
-**Keying:** per-authenticated-user (by SESSIONS-derived user id) for all authenticated endpoints, since REQUIREMENTS.md's data-integrity and fairness concerns are about a given account's behavior, not a given network address (a shared office IP, or a NAT'd household, would otherwise unfairly throttle multiple distinct users together). For unauthenticated endpoints — registration, login, password-reset request, and public share-link access (§4.2, §4.4) — keying falls back to source IP, since there is no authenticated identity yet; the public share-link password-throttling mechanism (DESIGN.md §3.8) is a separate, already-designed, per-token limiter and is not replaced or duplicated by this general IP-based layer — both apply, in sequence, to a password-protected public link request.
-
-**Scope and limits (defaults, tunable via configuration per §8.2's existing pattern — not fixed requirements):**
-
-| Endpoint class | Suggested limit | Rationale |
-|---|---|---|
-| Unauthenticated (register, login, password-reset request) | 20 requests / 15 min / IP | Coarse abuse guard; deliberately looser than a dedicated login-lockout mechanism would be, since that specific mechanism (REQUIREMENTS.md §8) remains out of scope — this is general API hygiene, not a substitute for it |
-| Authenticated, general (most of §4.3–§4.6) | 300 requests / min / user | High enough not to interfere with normal UI usage (folder listings, search-as-you-type, etc.) |
-| Authenticated, write-heavy (folder/file create, move, share, tag) | 60 requests / min / user | Tighter bound on mutation volume specifically, separate from the general read-heavy ceiling above |
-| Multipart upload part endpoints (§4.3) | Excluded from the general per-minute counters, bounded instead by `UPLOAD_SESSIONS.total_parts` and the upload session's own lifecycle (DESIGN.md §3.5) | A large legitimate upload can exceed a generic per-minute request count without being abusive; the existing session/quota mechanism is the correct control here, not a request-rate limiter layered on top of it |
-
-**Response on limit exceeded:** HTTP 429, using the same error envelope as §4.1 (`{ "error": { "code": "RATE_LIMITED", "message": "..." } }`), with a `Retry-After` header — this is an addition to §4.1's error-code list, not a new envelope shape.
-
-**Explicit non-goal of this addition:** this is a coarse, general-purpose API-abuse guard, not a replacement for REQUIREMENTS.md §8's deferred login-lockout feature (which would need to track failed-attempt *outcomes*, not just request volume, and would need account-level state analogous to SHARE_LINKS' `failed_password_attempts` pattern in DESIGN.md §3.8). If login lockout is picked up later, it is a distinct, additional mechanism layered on top of this one, not a superset this section already provides.
+| Addition | Where |
+|---|---|
+| Email verification at signup (login refused until verified) | `accounts/service.ts`, migration 0017 |
+| Folder download as a streamed ZIP, authenticated and via public links | `filesystem/folder-service.ts`, `access/share-link-service.ts` |
+| System-wide storage cap and per-user quota **pre-allocation** | migrations 0015, 0022; `admin/user-admin-service.ts` |
+| Admin-triggered object-store backup and restore | `admin/backup-service.ts`, `storage/client.ts` |
+| Admin outbound mail and inbound mail (Resend webhook) | `admin/notify-service.ts`, `email/*` |
+| Inline preview (image, video, audio, PDF) | `filesystem/file-service.ts` |
+| Change password (signed-in), profile edit | `accounts/service.ts` |
+| Storage breakdown charts (documents, images, videos) | `accounts/service.ts`, web `home`/`stats` |
+| API rate limiting (REQUIREMENTS.md §3 deferred login rate limiting) | `server.ts` and route configs |
 
 ---
 
-## 5. Cross-Cutting Application-Layer Mechanisms
+## 2. System architecture
 
-This section is the application-layer counterpart to DESIGN.md §5 ("Cross-Cutting Design Patterns") — for each pattern DESIGN.md specifies at the data level, this section states exactly which module implements it, in what code shape, and using which of the two data-access strategies from §1.3 (Prisma vs. raw SQL).
+### 2.1 Components
 
-### 5.1 The cycle-detection advisory lock (`filesystem` module)
-
-DESIGN.md §3.3 calls this "the single highest-risk item flagged across three review passes" and specifies the exact locking requirement: `pg_advisory_xact_lock` (transaction-scoped, not session-scoped) on both the moved subtree's root and the target parent's own node id, in canonical sorted order, before the ancestor-walk cycle check runs.
-
-**Implementation:** this must be raw SQL inside a single Prisma `$transaction` callback using `$queryRaw`, not a Prisma-modeled operation. Concretely:
-
-```
-BEGIN;
-SELECT pg_advisory_xact_lock(least(hashtext($subtreeRoot), hashtext($targetParent)),
-                              greatest(hashtext($subtreeRoot), hashtext($targetParent)));
--- ancestor-walk cycle check (recursive CTE or materialized_path prefix check)
--- move-authorization check (§5.3 below)
--- UPDATE FOLDERS SET parent_folder_id = ..., materialized_path = ... WHERE id = $subtreeRoot;
--- UPDATE FOLDERS SET materialized_path = ... WHERE materialized_path LIKE $oldPrefix || '%'; -- subtree rewrite
-COMMIT;
+```mermaid
+flowchart LR
+    B[Browser] -->|HTTPS, same origin| N[Next.js web<br/>port 3001]
+    N -->|rewrite /api/v1/*<br/>server-side| F[Fastify API<br/>port 3000]
+    B -.->|presigned GET<br/>download / preview / thumbnail| M[(MinIO<br/>S3 API 9000)]
+    F -->|Prisma + pg<br/>pooled, tx mode| P[(Postgres<br/>Supabase)]
+    F -->|minio SDK| M
+    F -->|HTTPS API| R[Resend<br/>email]
+    R -->|Svix-signed webhook<br/>/api/v1/email/inbound| F
 ```
 
-**Why raw SQL and not Prisma's query builder:** `pg_advisory_xact_lock` has no Prisma-native representation, and even if it did, the requirement that the lock, the cycle check, the authorization check, and both `UPDATE`s all happen inside one transaction with the lock acquired *first* is exactly the kind of ordering-sensitive, must-not-be-abstracted-over operation where an ORM's automatic transaction management could silently reorder or split statements across round-trips in a way that reopens the race DESIGN.md's Pass 3/5/6 fixes closed. This is flagged again in §10 as the single highest-priority item for adversarial review of this document, mirroring DESIGN.md's own treatment of the underlying mechanism.
+- The browser talks to **one origin** (the Next.js server). Next.js reverse-proxies `/api/v1/*` to the backend with a `rewrites()` rule. This is load-bearing: the session cookie is `SameSite=Lax`, and browsers do not send such cookies on cross-site `fetch`. Proxying makes every API call same-origin.
+- **File bytes travel two different ways.** Uploads go browser → Next.js proxy → Fastify → MinIO (in 5 MiB parts). Downloads, previews and thumbnails go **directly** from MinIO to the browser via short-lived presigned URLs, so MinIO's S3 port must be reachable from browsers (`MINIO_PUBLIC_*`).
+- Postgres is external (Supabase). The stack runs no database container.
 
-**Advisory lock key collision risk:** `hashtext()` on a UUID string is used to fold a 128-bit id into the 32-bit (or 64-bit, via the two-argument form used above) key space `pg_advisory_xact_lock` accepts. This introduces a theoretical hash-collision false-positive (two unrelated folders serializing against each other unnecessarily) but no false-negative risk (two operations that *should* serialize will always share a lock key if their ids match, since the hash is deterministic) — an acceptable trade-off flagged here rather than silently assumed, since DESIGN.md's own text (§3.3) discusses the locking *strategy* but not the mechanics of turning a UUID into an advisory-lock integer key.
+### 2.2 Trust boundaries
 
-### 5.2 The atomic conditional quota update (`accounts` module, called by `filesystem`)
+| Boundary | Protection |
+|---|---|
+| Internet → Next.js | TLS terminated by the operator's reverse proxy or tunnel (not part of this repo) |
+| Next.js → Fastify | Docker-internal network; no auth between them, the browser's cookie is forwarded by the rewrite |
+| Browser → MinIO | Presigned URLs (300 s), bucket has no public policy |
+| Resend → Fastify | HMAC-SHA256 Svix signature, 5-minute timestamp window, constant-time compare |
+| Fastify → Postgres | Connection string secret; RLS on with no policies, so anon-key API access is denied |
 
-DESIGN.md §3.1 and §5.3 require this to be a conditional update, not read-then-write, to avoid two concurrent uploads both reading a stale `storage_used_bytes`. Implementation: a single `UPDATE ... WHERE storage_used_bytes + $delta <= storage_quota_bytes RETURNING storage_used_bytes` (raw SQL via `$queryRaw`, for the same "no ORM round-trip splitting" reason as §5.1) — zero rows returned means the quota would be exceeded, which the calling code (in `filesystem`, for upload-part completion; in `trash`'s DELETION_QUEUE worker, for credit-back) treats as a rejection, mapped to the `QUOTA_EXCEEDED` API error code (§4.1). This same primitive is reused for the per-part multipart increment (DESIGN.md §3.5) and the DELETION_QUEUE worker's credit-back decrement — one function, `accounts.adjustStorageUsed(userId, deltaBytes)`, used everywhere `storage_used_bytes` changes, so there is exactly one place implementing DESIGN.md's "must only fire when `storage_used_bytes` increases" trigger-equivalent logic (an admin lowering `storage_quota_bytes` below current usage does not go through this function at all — it's a direct `UPDATE` on `storage_quota_bytes` alone, unconstrained, per DESIGN.md §3.1).
+### 2.3 Request flow (typical authenticated call)
 
-### 5.3 The move-authorization check (`access` module, called by `filesystem`)
-
-Implemented as `access.checkMoveAuthorization(userId, itemType, itemId, destinationFolderId)`, called from inside the same transaction as §5.1's lock/cycle-check (for folders) or directly (for files, which have no cycle risk but the identical two-part authorization rule per DESIGN.md §3.4). It performs, in order: (a) `access.checkPermission(userId, ..., 'editor')` against both the item and the destination; (b) if either fails, reject with `INSUFFICIENT_PERMISSION`; (c) otherwise, compute the resolved-user-set at the current location vs. the resolved-user-set the destination would produce (both via EFFECTIVE_PERMISSIONS with synchronous fallback, per DESIGN.md §3.7) and, if any user other than the mover would lose access, additionally require the mover to be the item's owner. This function is the one and only call site for this specific two-part rule — it is not duplicated between the folder-move and file-move handlers.
-
-### 5.4 Ownership and account-lifecycle procedures (`access` and `admin` modules)
-
-#### 5.4.1 `transfer_ownership()`
-
-A single database function (Postgres `PL/pgSQL`, invoked via `$queryRaw`, not reimplemented in application code) is the only code path permitted to change a PERMISSIONS `owner` row, per DESIGN.md §3.6's explicit requirement ("No code path — including admin actions — should ever `UPDATE`/`DELETE`/`INSERT` PERMISSIONS rows to change ownership except through this single routine"). Implementing this as a database function rather than an application-layer transaction was chosen specifically because DESIGN.md ties correctness here to the `DEFERRABLE INITIALLY DEFERRED` constraint's commit-time check (§3.6) — keeping the demote/promote pair and the constraint they satisfy in the same PL/pgSQL function makes it impossible for application code to insert other statements between the two writes within the same transaction, which a purely application-level "two Prisma calls in a `$transaction` block" pattern would not prevent (nothing stops a future engineer from adding a third statement in between).
-
-#### 5.4.2 `reassign_all_owned_items()`
-
-The bulk variant DESIGN.md §7 item #1 flags as needing full specification. Implemented as a second PL/pgSQL function that, within one transaction, calls `transfer_ownership()` once per item the departing user owns, then — per the granting-authority check's exemption #2 (DESIGN.md §3.6) — is the one place in the codebase permitted to invoke `transfer_ownership()` without the acting user holding prior access on each item, gated by an internal-only flag (not client-reachable) that only the account-deletion procedure below sets.
-
-#### 5.4.3 Account deletion procedure
-
-Implemented as `accounts.deleteAccount(userId, { replacementOwners? })`, following DESIGN.md §7 item #6's step ordering exactly: (1) `reassign_all_owned_items()`; (2) `accounts.revokeAllSessions(userId)`; (3) the single `DELETE FROM USERS WHERE id = $userId` statement, whose cascades (SHARE_LINKS, PERMISSIONS-as-grantee, TAGS→ITEM_TAGS, FAVORITES) are database-level `ON DELETE CASCADE` per DESIGN.md and therefore **not** separately implemented in application code — this function must not re-delete those rows itself, only trigger the one statement and then, for step (c)'s side effect, enqueue an EFFECTIVE_PERMISSIONS rebuild for every item that had a PERMISSIONS-as-grantee row just cascade-deleted (DESIGN.md §7 item #6(c)'s explicit requirement that the cascade alone doesn't update the derived cache). ACTIVITY_LOG rows referencing the deleted user are left untouched (DESIGN.md §7 item #6(f)) — `audit` module writes already snapshot a display name into `metadata` at write time for this reason, per that same section.
-
-Both the self-service (`DELETE /api/v1/users/me`) and admin-initiated (`DELETE /api/v1/admin/users/:id`) endpoints call this same function — the only difference is that self-service always omits `replacementOwners` (forcing the default-admin-reassignment policy, REQUIREMENTS.md §5.1.1), while the admin path may supply explicit per-item replacement owners.
+1. Browser calls `fetch("/api/v1/…", { credentials: "include" })`.
+2. Next.js rewrite forwards to `BACKEND_URL` with the `Cookie` header.
+3. Fastify: cookie plugin → global rate limit (§13.3) → body parser → route `preHandler` `requireSession` → JSON-schema validation → service function → response.
+4. Errors are thrown as `AppError` and mapped by one global error handler to `{ error: { code, message } }`.
 
 ---
 
-## 6. Data Access Strategy: Prisma vs. Raw SQL — Consolidated List
+## 3. Technology stack
 
-Gathering the raw-SQL requirement scattered through §5 into one place, for the same reason DESIGN.md consolidates its indexing requirements into one list at §5.4 rather than leaving them scattered through §3 — a future implementer or reviewer should be able to check this list once rather than re-derive it from every mechanism's individual description.
-
-**Must be raw parameterized SQL (`$queryRaw`/`$executeRaw` inside a single Prisma `$transaction`), never Prisma's query builder:**
-
-- The cycle-detection advisory lock sequence (§5.1) — lock, cycle check, authorization check, and both `materialized_path` updates, one transaction, lock acquired first.
-- The atomic conditional quota update (§5.2) — `UPDATE ... WHERE ... RETURNING`, single round trip.
-- `transfer_ownership()` and `reassign_all_owned_items()` (§5.4.1, §5.4.2) — implemented as PL/pgSQL functions, called via `$queryRaw('SELECT transfer_ownership($1, $2, $3, $4)', ...)`.
-- The EFFECTIVE_PERMISSIONS synchronous-fallback ancestor walk, when the cache misses (DESIGN.md §3.7) — a recursive CTE over `materialized_path`, not something Prisma's relational query API expresses efficiently.
-- The DELETION_QUEUE and THUMBNAIL_QUEUE claim step (`UPDATE ... SET status = 'processing' WHERE status = 'pending' ... LIMIT N FOR UPDATE SKIP LOCKED RETURNING ...`) — `SKIP LOCKED` has no Prisma equivalent and is required (§7.2) to let multiple in-process worker ticks claim disjoint rows safely.
-
-**Everything else** — USERS/SESSIONS CRUD, FOLDERS/FILES simple reads and non-move writes, PERMISSIONS grant/revoke (outside of ownership), FAVORITES, TAGS/ITEM_TAGS, ACTIVITY_LOG writes and admin queries, SHARE_LINKS CRUD outside the password-throttle counters — is ordinary Prisma model access, since none of it has the same single-transaction/race-sensitive/lock-ordering requirements as the operations above.
+| Layer | Technology |
+|---|---|
+| Backend runtime | Node.js ≥ 18 (Docker: `node:22-slim`), TypeScript 5.7, ESM |
+| HTTP framework | Fastify 5, `@fastify/cookie`, `@fastify/rate-limit` |
+| Data access | Prisma Client 6 (`prisma/schema.prisma`), raw SQL via `pg`/Prisma for locks and bulk updates |
+| Object store | MinIO (`minio` SDK 8), `quay.io/minio/minio` pinned release |
+| Image / media | `sharp` (images), `ffmpeg` (video frames), `poppler-utils`/`pdftoppm` (PDF first page), all in the runtime image |
+| Archive | `archiver` 8 (`ZipArchive`) for folder ZIPs |
+| Password hashing | `bcryptjs` (cost 12) |
+| Email | Resend HTTPS API (no SDK; plain `fetch`) |
+| Frontend | Next.js 15 (App Router, `output: "standalone"`), React 19 |
+| Client data layer | TanStack Query 5 |
+| UI | Tailwind CSS 3, Radix primitives (`react-dialog`, `react-dropdown-menu`, `react-slot`), shadcn-style local components, `lucide-react` icons |
+| Tests | Node's built-in test runner via `tsx` |
+| CI/CD | GitHub Actions on a **self-hosted runner** |
 
 ---
 
-## 7. Background Workers
+## 4. Backend architecture
 
-### 7.1 Execution model: in-process async tasks
+### 4.1 One deployable, modular monolith
 
-Per the system owner's specification (§1.3), all five asynchronous mechanisms run as scheduled async tasks inside the same Node.js process as the API server, using `setInterval`-driven polling loops (one per queue/job type) rather than a separate worker process or an external job-queue system (e.g., BullMQ/Redis).
+A single Fastify process (`src/server.ts`) registers all route plugins and starts three in-process workers. There is no message broker, no separate worker deployment, and no shared cache. State lives in Postgres and MinIO.
 
-**Trade-offs, stated explicitly since this is a real design choice with real consequences, not a default:**
+```
+src/
+  server.ts            app setup, rate limiting, error handler, route registration, worker start
+  config.ts            typed env config (fails fast on missing DATABASE_URL / MinIO keys)
+  db.ts                one shared PrismaClient
+  lib/                 password (bcrypt), tokens (random + SHA-256), email (Resend), emailTemplate
+  modules/
+    accounts/          register/verify/login/logout/sessions/reset/profile/storage usage
+    access/            permission-check (the authorization primitive), permission-service, share-link-service
+    filesystem/        folder-service, file-service, upload-service, normalize
+    trash/             restore-service, deletion-queue-service
+    organize/          favorite-service, tag-service
+    search/            search-service
+    thumbnails/        thumbnail-service, generate
+    lifecycle/         deactivate / reactivate / delete account
+    admin/             user-admin-service, audit-service, backup-service, notify-service
+    email/             inbound-service (Svix verify + store)
+    storage/           client.ts, the only module that touches MinIO
+  workers/             upload-session-cleanup, deletion-queue, thumbnail-queue
+scripts/               bootstrap-admin.ts, migrate.ts
+```
 
-- **Pro:** simplest possible deployment — one process, no additional infrastructure component (no Redis, no separate worker fleet to deploy/monitor), consistent with the single-server deployment shape both prior documents assume. Matches DESIGN.md §5.3's own framing that these mechanisms don't prescribe "any particular tool," only that they be asynchronous, decoupled, and retryable.
-- **Con:** the worker loops and the API request handlers compete for the same event loop and the same database connection pool. A burst of API traffic can delay a worker tick (and vice versa — a long-running purge batch could add latency to concurrent API requests if not chunked carefully, see §7.3). This is judged acceptable at the stated deployment scale (self-hosted app, non-SaaS, DESIGN.md §1.3) but is the main reason §10 flags this as worth revisiting if the deployment target ever changes.
-- **Con, specific to Supabase's pooler (§1.3):** Supabase's transaction-mode pooler (Supavisor) holds a pooled backend connection only for the duration of one transaction, then returns it — a worker tick that claims a batch via `SKIP LOCKED` (§7.2) and then processes each row slowly (e.g., a MinIO round-trip per DELETION_QUEUE row) inside one long transaction would hold that pooled connection, and its lock, for the whole batch, reducing the pool's effective capacity for concurrent API requests during that window. The mitigation is structural, not configuration: each worker's per-row processing (§7.2 step 3) must commit its own row's transaction before moving to the next claimed row, rather than processing an entire claimed batch inside one transaction — the claim step (`SKIP LOCKED`) and each row's processing step are already described as separate steps in §7.2, and this is the reason that separation matters, not just a stylistic choice.
-- **Con:** a process crash or restart (deploy, crash-loop) stops both the API and every background worker simultaneously — there is no independent worker availability. DESIGN.md's queue-table design (durable rows in Postgres, not in-memory state) means no work is *lost* on a restart — every `pending` row is still there and gets picked up again — but there is a window of zero background processing during any restart. Acceptable for a self-hosted single-server deployment where some downtime during a deploy is already an accepted characteristic, but stated here rather than left implicit.
-- **Migration path if this is revisited:** because every worker's actual logic (§7.2–§7.6 below) is written as a plain async function taking a Postgres connection/Prisma client, extracting these into a separate worker process later (or moving to an external queue) would only require changing *what schedules* the function call, not the function bodies themselves — the polling-loop wrapper is a thin, swappable layer specifically so this decision doesn't lock in a large rewrite later.
+### 4.2 Module responsibilities and dependency direction
 
-### 7.2 Common worker shape
-
-Every worker (DELETION_QUEUE, THUMBNAIL_QUEUE, EFFECTIVE_PERMISSIONS rebuild, UPLOAD_SESSIONS cleanup, 30-day trash purge) follows the same shape, to avoid five subtly-different retry/claim implementations:
-
-1. A `setInterval` tick (interval configurable per-worker; see §7.7 for suggested defaults) calls a `claimBatch(limit)` function.
-2. `claimBatch` runs `UPDATE <queue_table> SET status = 'processing' WHERE id IN (SELECT id FROM <queue_table> WHERE status = 'pending' ORDER BY enqueued_at LIMIT $limit FOR UPDATE SKIP LOCKED) RETURNING *` — raw SQL (§6), because `SKIP LOCKED` is what makes it safe for this pattern to run concurrently with itself if a slow tick is still processing a prior batch when the next interval fires (an in-process safeguard also prevents overlapping ticks for the same worker, per §7.3, but the database-level guard is the one that actually matters if that safeguard is ever bypassed or removed).
-3. Each claimed row is processed individually, wrapped in a `try`/`catch`; success moves it to `done`, a retryable failure increments `attempts` and moves it back to `pending`, and exceeding the configured max-attempts moves it to `failed` (DESIGN.md §3.10's retry policy, applied identically to §3.13's).
-4. A `failed` row is surfaced via the admin "failed deletions" view (DESIGN.md §3.10) — `GET /api/v1/admin/failed-jobs`, added here as an endpoint not explicitly listed in §4 since it wasn't a REQUIREMENTS.md-level user-facing capability, only an operational necessity DESIGN.md itself calls for.
-
-### 7.3 Overlap prevention within one process
-
-Because all workers share one process, an explicit in-memory guard (a simple boolean-per-worker "tick in progress" flag, checked and set before each `claimBatch` call) prevents a worker's own next scheduled tick from starting while a prior tick (e.g., a large purge batch) is still running — this is a scheduling courtesy to avoid unbounded concurrent ticks piling up under load, distinct from and layered on top of the database-level `SKIP LOCKED` guard in §7.2, which protects correctness; this in-memory flag only protects the single process's own resource usage.
-
-### 7.4 EFFECTIVE_PERMISSIONS rebuild worker — the one worker with an ordering requirement
-
-DESIGN.md §3.7 (Pass 6 fix) requires this worker specifically to discard a job whose triggering-event timestamp is older than the target row's current `recomputed_at`, rather than blindly overwriting — the generic `claimBatch`/process/`done` shape in §7.2 is extended for this worker only: before writing a recomputed EFFECTIVE_PERMISSIONS row, the worker re-checks `recomputed_at` against the job's own carried event timestamp and no-ops (marks `done` without writing) if the existing row is already newer. This is the one place across all five workers where "processed" and "had an effect" are allowed to diverge, and is called out explicitly here so it isn't lost inside the shared §7.2 template.
-
-### 7.5 THUMBNAIL_QUEUE worker — the one worker with a late re-check
-
-Per DESIGN.md §3.13's orphaned-blob fix, this worker must re-check `FILES.deleted_at IS NULL` immediately before writing the generated thumbnail blob — not only at claim time. Implemented as a second, cheap `SELECT deleted_at FROM FILES WHERE id = $fileId` immediately preceding the MinIO `putObject` call inside the per-row processing step (§7.2 step 3), not merged into the initial claim query, since the whole point is to catch a deletion that happened *during* the (potentially slow) thumbnail-rendering step between claim and write.
-
-### 7.6 Scheduled (time-based) vs. event-triggered workers
-
-DELETION_QUEUE and THUMBNAIL_QUEUE are populated by two different triggering styles that this document's worker model must support side by side:
-
-- **Event-triggered enqueue:** an API request handler (e.g., trash/delete, or upload-completion) inserts a `pending` row directly, inside the same transaction as the triggering write, so the enqueue can never be lost to a crash between the write and the enqueue.
-- **Time-triggered enqueue:** the 30-day trash purge has no single triggering event — it's a separate `setInterval` tick (suggested: hourly) that queries `FILES`/`FOLDERS` for `deleted_at` older than 30 days with no existing `pending`/`processing` DELETION_QUEUE row (DESIGN.md §5.2's reworked per-item-clock mechanism) and inserts the missing rows, after which those rows flow through the exact same `claimBatch`/process/`done` pipeline as any explicitly-enqueued row — there is no separate "purge worker" distinct from the DELETION_QUEUE worker; the 30-day job's only job is populating the same queue table.
-- Similarly, UPLOAD_SESSIONS cleanup (§3.5) is a time-triggered scan (suggested: every 5 minutes) for `status = 'pending' AND expires_at < now()`, performing the abort-and-credit-back procedure directly (it has no separate queue table of its own to enqueue into — DESIGN.md models this as a direct state transition on UPLOAD_SESSIONS itself, not a queue).
-
-### 7.7 Suggested polling intervals
-
-Stated as defaults, not requirements — none of REQUIREMENTS.md or DESIGN.md mandates a specific interval, and these are tunable via configuration:
-
-| Worker | Interval | Rationale |
+| Module | Owns | Depends on |
 |---|---|---|
-| DELETION_QUEUE | 10s | User-visible latency for "delete forever" completing; also processes 30-day-purge-populated rows |
-| THUMBNAIL_QUEUE | 5s | Thumbnails are a UX nicety users notice quickly if slow |
-| EFFECTIVE_PERMISSIONS rebuild | 2s | Cache staleness window — kept short even though the synchronous fallback (DESIGN.md §3.7) means correctness never depends on this being fast |
-| UPLOAD_SESSIONS cleanup | 5 min | Abandoned-upload cleanup is not user-latency-sensitive |
-| 30-day trash purge scan | 1 hour | A day-granularity deadline doesn't need sub-hour polling precision |
+| `accounts` | `users`, `sessions`, token tables; `AppError` base class | `lib/*` |
+| `access` | `permissions`, `share_links`; `checkPermission` | `accounts`, `admin/audit`, `storage`, `filesystem` (zip, previewability), `thumbnails` |
+| `filesystem` | `folders`, `files`, `upload_*` | `access`, `storage`, `thumbnails`, `admin/audit` |
+| `trash` | `deletion_queue`; restore | `access`, `filesystem/errors`, `thumbnails`, `storage` |
+| `organize` | `favorites`, `tags`, `item_tags` | `access`, `admin/audit` |
+| `search` | search query | `db` only |
+| `thumbnails` | `thumbnail_queue`; generation | `storage`, `access` |
+| `lifecycle` | account lifecycle wrappers | `admin/audit`, Postgres functions |
+| `admin` | stats, settings, backup, mail, audit | `accounts`, `lifecycle`, `storage`, `email` |
+| `storage` | every MinIO call | `config` |
 
-### 7.8 The reconciliation/repair job — not yet designed here either
+**The two rules that matter:**
 
-DESIGN.md §5.3 and §7 item #2 flag, as an explicitly deferred (not forgotten) item, a periodic job to detect drift between the three denormalized values (`storage_used_bytes`, `materialized_path`, EFFECTIVE_PERMISSIONS) and their source-of-truth tables — DESIGN.md itself never specified this job, only named the need for one. This document's worker model (§7.1–§7.7) is built around the five mechanisms DESIGN.md *did* fully specify (DELETION_QUEUE, THUMBNAIL_QUEUE, EFFECTIVE_PERMISSIONS rebuild, UPLOAD_SESSIONS cleanup, 30-day purge) and does not extend that model to cover reconciliation, since there is nothing yet to schedule — no target drift-detection query or repair procedure has been designed, here or in DESIGN.md. IMPLEMENTATION_PHASES.md §2 already anticipates this as its own subcomponent (#9, "Reconciliation & Repair Job," explicitly sequenced last), so this is not a gap this document introduces — it inherits an already-acknowledged open item rather than silently dropping it. Flagged explicitly here (and in §10) so it isn't mistaken for coverage this document doesn't actually provide: when that job is designed, it fits the same `setInterval`-driven in-process worker shape as §7.1–§7.2 describe (a long-interval tick, e.g. daily, comparing derived values against a recomputation and either correcting or flagging drift), but the specific comparison logic and correction/flagging policy are new design work, not something this document's existing worker template already covers by extension.
+1. **Every authorization decision goes through `access/permission-check.ts`.** No other module queries `permissions` to decide access. (Two known exceptions do so for *listing*, not authorization: `listSharedWithMe` and `search`.)
+2. **Only `storage/client.ts` constructs or dereferences a storage key.** No other module talks to MinIO.
 
----
+Cross-module coupling is looser than this layering suggests. For example, `access` imports from `filesystem` and `thumbnails`, and `filesystem` imports from `access`, so the module graph has cycles that ESM tolerates.
 
-## 8. Deployment and Infrastructure Shape
+### 4.3 Request lifecycle and cross-cutting behavior
 
-### 8.1 Process topology
+| Concern | Implementation |
+|---|---|
+| Body limit | 10 MiB (`server.ts`), above Fastify's 1 MiB default so 5 MiB raw upload parts fit |
+| Content types | JSON (Fastify built-in), plus a registered `application/octet-stream` → `Buffer` parser for upload parts. The inbound-mail plugin overrides JSON parsing locally to keep the raw body for signature checking. |
+| Session guard | `requireSession` preHandler: reads the cookie, resolves the session, attaches `request.session`. **Duplicated in each `routes.ts`** (accounts, filesystem, access, trash, organize, search, admin). A shared module was planned but never extracted. |
+| Validation | Fastify JSON schemas on bodies and queries where present. Many routes (`PATCH /folders/:id`, `PATCH /files/:id`, admin `DELETE`) read the body with no schema. Validation failures map to `400 VALIDATION_ERROR`. |
+| Error handling | One `setErrorHandler`: `AppError` → `{statusCode, {error:{code,message}}}`; Fastify validation → 400; anything else → logged and `500 INTERNAL_ERROR` |
+| Serialization | `bigint` values are returned as **strings** in user-facing payloads, or as JS `Number` in admin aggregates and user rows (safe for single-host byte counts). |
+| Logging | Fastify's built-in logger (`logger: true`); workers use `console` |
+| Health | `GET /health` → `{status:"ok"}` (does not check Postgres or MinIO) |
 
-**Owner decision: hosted on a single Ubuntu server, Docker wherever possible.** This supersedes this section's earlier framing — the application is no longer described as one undifferentiated "self-hosted runtime process" but as containerized services on that host, per FRONTEND_DESIGN.md §7's now-Docker-specific deployment section (that document owns the concrete `docker-compose.yml`/Dockerfile detail; this section states the resulting shape from the backend's point of view):
+### 4.4 Error model
 
-1. **The application (backend) process, containerized** — the single Node.js/Fastify deployable described in §3, containing the API layer, all domain modules, and all background workers (§7), built and run as a Docker image (root `Dockerfile`) rather than a bare Node process on the host. **Runs as a single container/instance — multi-instance deployment is explicitly out of scope for this design (§8.3, owner-confirmed)**, consistent with "Docker wherever possible" being a packaging/operability decision, not a move toward horizontal scaling.
-2. **The frontend, containerized separately** — FRONTEND_DESIGN.md's Next.js application, its own image (`web/Dockerfile`), a distinct container from the backend, communicating with it over the Docker Compose network by service name (`http://backend:3000`) rather than `localhost` — the two are different containers, not two processes sharing a host network namespace the way local (non-Docker) development runs them.
-3. **MinIO, also a container** — self-hosted, as specified by §1.3, run as the official `minio/minio` image alongside the two application containers, orchestrated by the same `docker-compose.yml` rather than provisioned separately. The sole blob store, reachable only from the `storage` module (§3.2), never directly from a client — download/thumbnail URLs are short-lived, scoped, presigned MinIO URLs generated by the application, not raw bucket exposure. **Not yet consumed by any code** — the `storage` module that will actually talk to it is part of Subcomponent 1 (Core Filesystem), not yet built; the container and its credentials exist in the compose topology now so they're already in place when that module lands.
-4. **Supabase-hosted PostgreSQL — deliberately NOT containerized**, and not part of this Docker topology at all. It remains externally managed by Supabase (§1.3), reached exclusively through Supabase's connection pooler (§1.3.1) from the backend container — no direct/unpooled connection string is used anywhere in this design, including for the lock-sensitive raw-SQL operations in §5, since §1.3.1 establishes that the pooler is safe for those by construction. "Docker wherever possible" does not mean "Docker for Postgres too" — Supabase's hosting is a separate, already-settled decision (§1.3) this one doesn't reopen.
+Every error is `{ "error": { "code": string, "message": string } }`. Clients branch on `code`, never on the message.
 
-Four containers total (backend, frontend, minio, plus a one-shot `minio-init` that creates the app's bucket and exits), one externally-managed database. Concretely verified, not just designed on paper: all three long-running containers were built and brought up together via `docker compose up`, and a full login round trip (`POST /auth/login` → session cookie → `GET /auth/me`) was exercised through the frontend container's reverse proxy to the backend container, confirming the cross-container network path and cookie handling both work as designed.
+| Status | Codes |
+|---|---|
+| 400 | `VALIDATION_ERROR`, `REGISTRATION_FAILED`, `WEAK_PASSWORD`, `INVALID_RESET_TOKEN`, `INVALID_VERIFICATION_TOKEN`, `NAME_TOO_LONG`, `PATH_TOO_LONG`, `NOT_A_FOLDER` (defined, unused), `INVALID_EMAIL`, `INVALID_SUBJECT`, `INVALID_BODY`, `INVALID_JSON` |
+| 401 | `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `INVALID_PASSWORD` (share-link password), `INBOUND_NOT_CONFIGURED`, `INVALID_SIGNATURE` |
+| 403 | `INSUFFICIENT_PERMISSION`, `ACCOUNT_DEACTIVATED`, `EMAIL_NOT_VERIFIED`, `REGISTRATION_CLOSED` |
+| 404 | `NOT_FOUND`, `SESSION_NOT_FOUND`, `UPLOAD_SESSION_NOT_FOUND`, `NO_LONGER_AVAILABLE` |
+| 409 | `NAME_COLLISION`, `CYCLE_DETECTED`, `UPLOAD_SESSION_INVALID`, `NOT_IN_TRASH`, `PURGE_IN_FLIGHT`, `LAST_ADMIN`, `NO_SYSTEM_ADMIN`, `SYSTEM_STORAGE_ALLOCATION_EXCEEDED`, `STORAGE_LIMIT_BELOW_ALLOCATION` |
+| 422 | `QUOTA_EXCEEDED`, `SYSTEM_STORAGE_LIMIT_EXCEEDED` |
+| 429 | `RATE_LIMITED` (global limiter, and share-link password throttle) |
+| 500 | `INTERNAL_ERROR` |
 
-**A real bug found only by actually running the built containers, not by reasoning about the config:** `next.config.js`'s `rewrites()` (FRONTEND_DESIGN.md §7) is evaluated once at `next build` time to produce Next's routes manifest — it is **not** re-read per-request at runtime. Setting `BACKEND_URL` as a Docker Compose runtime `environment:` variable therefore has no effect on an already-built image; the proxy kept resolving to `localhost:3000` (baked in from the environment the image happened to be built in) even though `printenv` inside the running container correctly showed `BACKEND_URL=http://backend:3000`. Fixed by making `BACKEND_URL` a Docker **build** argument (`web/Dockerfile`'s `ARG BACKEND_URL`, `docker-compose.yml`'s `build.args`) instead of a runtime environment variable — the frontend image is therefore specific to this compose topology (baked to expect the backend at `backend:3000`), which is fine since it's always deployed via this same `docker-compose.yml`, not reused across differently-shaped deployments.
+**Existence hiding.** The filesystem, trash, organize and thumbnail services return `404 NOT_FOUND` when the caller lacks permission, so a user with no access cannot tell whether an item exists. The sharing endpoints (`permission-service`) return `403 INSUFFICIENT_PERMISSION` instead. Download and preview return `404 NO_LONGER_AVAILABLE`. The mix is intentional but not uniform.
 
-### 8.2 Configuration
+`QUOTA_EXCEEDED` (the user's own quota) and `SYSTEM_STORAGE_LIMIT_EXCEEDED` (the shared cap) are deliberately distinct so the UI does not blame the user's quota for a full system.
 
-Environment-variable-driven configuration (12-factor style) for: the Supabase pooled-connection string (project ref, pooler host/port, and credentials — never the direct-connection string, per §8.1 item 4), MinIO endpoint/credentials/bucket name, session cookie signing secret, default new-user quota (REQUIREMENTS.md §5.1's "system-wide configuration" requirement), password-reset token TTL, worker polling intervals (§7.7's defaults, overridable), rate-limit thresholds (§4.7's per-endpoint-class limits table, overridable per class rather than as one global number), and the bootstrap-first-admin mechanism (REQUIREMENTS.md §5.1) — implemented as a one-time CLI command (`npm run bootstrap:admin`, runnable inside the deployed backend container via `docker compose exec backend`) run against the deployed database rather than an environment flag left permanently set, so there's no standing configuration that could be accidentally left enabled and allow repeated admin bootstrapping. Secrets (the Supabase connection string, MinIO root credentials) are supplied via a `.env` file read by `docker-compose.yml` at the repo root, gitignored, never baked into either image — the one exception being `BACKEND_URL` itself (§8.1's build-arg fix above), which is topology configuration, not a secret.
+### 4.5 Data-access strategy
 
-### 8.3 Multi-instance — decided out of scope
+Prisma is the default. Raw SQL is used only where Prisma cannot express the operation: advisory locks, `LIKE`-prefix subtree updates, recursive size and count queries, `ON CONFLICT … WHERE` partial-index upserts, `FOR UPDATE SKIP LOCKED` claims, the atomic conditional quota `UPDATE … RETURNING`, `ILIKE` search, and calls to the Postgres functions `transfer_ownership` and `delete_account`. The full list is in DESIGN.md §7.5.
 
-**Decision (owner-confirmed): the application process runs as a single instance. Multi-instance deployment is explicitly out of scope for this design.** This resolves what was previously an open caveat: §7.3's in-memory overlap-prevention flag being per-process rather than fleet-wide is a non-issue under this decision, since there is only ever one process. The `SKIP LOCKED` claim query in §7.2 would have kept multi-instance correctness intact regardless (it's instance-count-agnostic by design), but that safety net is now moot rather than merely unexercised. If the deployment target ever changes to require more than one instance, §7.3's flag and the worker-scheduling model in §7.1 would need revisiting (most likely a Postgres-advisory-lock-based single-leader-election for tick *scheduling*, not row claiming) — but that is future work triggered by a future decision, not a present gap.
-
-### 8.4 Backups and the two-store consistency question — decided out of scope for now
-
-**Decision (owner-confirmed): no backup/restore design is done in this phase.** The operator's stated plan is to duplicate the object store at the database layer at a later time — i.e., a future redesign that stores blob content (or a replicated copy of it) inside the same transactional boundary as the metadata, rather than solving today's two-independent-stores backup/restore gap as a bolt-on reconciliation mechanism. Until that redesign happens, Postgres (Supabase-managed) and MinIO (self-hosted) remain two independently-backed-up stores with no cross-store transaction, and the orphaned-reference/orphaned-blob risk across a backup/restore boundary described in the prior draft of this section is accepted, not mitigated, for this phase. This is a deliberate scope decision, not an oversight — recorded here so a future reader doesn't mistake the current design's silence on backup/restore for an unnoticed gap.
-
----
-
-## 9. Consistency Check Against REQUIREMENTS.md and DESIGN.md
-
-A deliberate self-check pass — walking REQUIREMENTS.md §5 section by section and confirming this document has a corresponding mechanism — rather than assuming coverage:
-
-- §5.1 Accounts/Access → §4.2, §7.6 (session invalidation on deactivation via `accounts.revokeAllSessions`, called from `admin`'s deactivate endpoint, not yet explicitly cross-referenced above — noted as a gap closed here: the deactivate endpoint in §4.6 must call the same `revokeAllSessions` primitive §5.4.3 uses for deletion).
-- §5.1.1 Account Deletion → §5.4.3.
-- §5.2 Folders, §5.3 Files → §4.3, §5.1, §5.3.
-- §5.4 Trash → §4.5, §7.6.
-- §5.5 Sharing → §4.4, §5.3, §5.4.1.
-- §5.6 Quotas → §5.2.
-- §5.7 Favorites → §4.5.
-- §5.8 Tags → §4.5.
-- §5.9 Thumbnails → §4.5, §7.5.
-- §5.10 Administration → §4.6.
-- §5.11 Listing/pagination → §4.1 (cursor-based, applied per-endpoint in §4.3–§4.6).
-- §5.12 Error feedback → §4.1's error envelope and code list.
-- §5.13 Activity logging → the `audit` module (§3.2), called from every mutating handler — **not yet given its own dedicated subsection above**, flagged in §10.
-
-**One correction made during this check:** the deactivation endpoint (§4.6) as originally drafted didn't explicitly state it calls `accounts.revokeAllSessions` — corrected in the bullet above. This is exactly the kind of gap DESIGN.md's own multi-pass process (§2 there) was built to catch, and its discovery here during a first self-check (rather than a later, separate review pass) is a data point for §10's "how much review this document still needs" question, not evidence the document is already sufficiently reviewed.
+Database errors are translated by message: services `includes()`-match `QUOTA_EXCEEDED`, `SYSTEM_STORAGE_LIMIT_EXCEEDED`, `LAST_ADMIN`, `SYSTEM_STORAGE_ALLOCATION_EXCEEDED`, `STORAGE_LIMIT_BELOW_ALLOCATION`, `INSUFFICIENT_PERMISSION`, `OWNER_NOT_FOUND`, or the Prisma code `P2002` (unique violation), and rethrow as `AppError`.
 
 ---
 
-## 10. Open Items for the Next Design Phase
+## 5. Authentication and sessions
 
-Mirroring DESIGN.md §7's structure — explicitly separating what's settled from what still needs resolution, so this document doesn't overstate its own maturity.
+### 5.1 Credentials and tokens
 
-1. **This document has undergone one review pass (v1), but v2's Supabase revision (§1.3, §1.3.1, §8) has not itself been separately reviewed.** DESIGN.md reached its current state only after six passes, several of which found genuine, non-cosmetic bugs (the advisory-lock scope error, the granting-authority gap) that a single confident-sounding draft did not catch on its own — and DESIGN.md's own Pass 6 round 2 exists specifically because a *prior* pass's fixes needed their own regression check, which is exactly the situation v2 is now in relative to v1. Before implementation, this document should get a pass specifically re-checking §1.3.1's pooler/advisory-lock reasoning and §8's revised topology against the rest of the document (e.g., does anything in §5–§7 implicitly assume a directly-managed Postgres instance that the Supabase move invalidates?), plus the broader fresh-eyes pass against REQUIREMENTS.md and DESIGN.md together that v1 already received once.
-2. **The `audit` module's write path is named but not designed.** §3.2 lists it, §9 flags that it has no dedicated subsection. It needs: where in each handler the log write happens (before or after the main operation commits — almost certainly must be in the same transaction, given ACTIVITY_LOG's audit-integrity purpose, but this hasn't been stated), and how "an admin viewing another user's files" (REQUIREMENTS.md §5.10) is batched into one `view` row per browsing session rather than per-request (DESIGN.md §3.9 specifies the *what*; this document hasn't yet specified the *how*, e.g. a session-scoped debounce).
-3. **The advisory-lock-key hash-collision trade-off (§5.1)** is stated but not quantified — worth a brief analysis of whether `hashtext()`'s collision rate at expected folder-count scale is truly negligible, or whether a wider key (e.g., splitting the UUID into two 32-bit halves fed to the two-argument lock function, rather than hashing) would be safer with no real cost.
-4. ~~**The two-store backup/restore consistency question (§8.4)** is flagged, not resolved.~~ **Resolved (decided out of scope for now, §8.4):** owner-confirmed — no backup/restore mechanism is designed in this phase; the operator's stated future plan is to duplicate the object store at the database layer rather than bolt on a reconciliation mechanism for the current two-store split. Removed from open items.
-5. ~~**Rate limiting**~~ **Partially resolved, split in two:** **login-attempt throttling** stays deferred exactly as REQUIREMENTS.md §3/§8 states — owner-confirmed, no change. **General API rate limiting**, however, is now pulled into scope for this phase (owner-confirmed, reversing the initial "stay deferred" default) — see the new §4.7 for its design. This is a deliberate, scoped addition to REQUIREMENTS.md's stated non-goals: REQUIREMENTS.md §3/§8 frames rate limiting broadly as deferred, but the owner has now specifically requested API-level throttling be designed now, while leaving login-attempt lockout (a related but distinct mechanism, per the original open-item split) deferred. This document does not amend REQUIREMENTS.md itself — that document still lists rate limiting under deferred non-goals — but this application-layer design now includes the mechanism as an owner-directed addition on top of it.
-6. ~~**Multi-instance deployment (§8.3)**~~ **Resolved (decided out of scope, §8.3):** owner-confirmed — single-instance only. Removed from open items; §7.3's per-process overlap-prevention flag is sufficient as designed, with no leader-election mechanism needed.
-7. **API request/response JSON Schemas themselves are not written out** — §4 defines the endpoint inventory and the checks each performs, but not the literal field-level schema for each request/response body. That's the natural next drafting step once this document's higher-level shape is reviewed and confirmed, to avoid rework if the endpoint list itself changes during review.
-8. **The reconciliation/repair job (§7.8) has no design here** — this document's worker model covers the five mechanisms DESIGN.md fully specified, but not the drift-detection/repair job DESIGN.md §7 item #2 leaves open. IMPLEMENTATION_PHASES.md already anticipates this as its own subcomponent (#9), sequenced last — this document should get a §7.8-equivalent full design (target queries, correction vs. flag-only policy, scheduling) once subcomponents 1–7 are stable enough to know what "drift" actually looks like in practice, consistent with IMPLEMENTATION_PHASES.md's own sequencing rationale for building it last.
+| Item | Design |
+|---|---|
+| Password | ≥ 8 characters (API `minLength` plus `isPasswordStrongEnough`); bcrypt cost 12 |
+| Session token | 32 random bytes, base64url, sent as a cookie; **SHA-256 hash** stored in `sessions.refresh_token_hash` |
+| Cookie | Name `dbase_session` (`SESSION_COOKIE_NAME`); `httpOnly`, **`secure: true` always**, `sameSite: lax`, `path: /`, expires with the session |
+| Session lifetime | `SESSION_TTL_DAYS` (default 30), **fixed**, not extended by activity |
+| Reset / verification tokens | 32 random bytes; hashed at rest; single use; 30 min and 24 h |
+
+`secure: true` is unconditional. It works on `http://localhost` (browsers treat localhost as a secure context) but a deployment served over plain HTTP on any other host will silently lose its cookie. TLS in front of the frontend is required.
+
+### 5.2 Flows
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant W as Web
+    participant A as API
+    participant E as Resend
+    U->>W: Register (email, password, name)
+    W->>A: POST /auth/register
+    A->>A: insert user (unverified, default quota)
+    A->>E: verification email (link → /verify-email?token=…)
+    U->>W: click link
+    W->>A: POST /auth/verify-email {token}
+    A->>A: email_verified = true
+    U->>W: Log in
+    W->>A: POST /auth/login
+    A->>A: password ✓ → is_active ✓ → email_verified ✓
+    A-->>W: Set-Cookie dbase_session (httpOnly)
+    W->>A: GET /auth/me (on every app load)
+```
+
+- **Registration** inserts the user with the default quota. If the system is fully allocated, the pre-allocation trigger rejects the insert and the API returns `REGISTRATION_CLOSED`. An existing, **verified** email returns a generic `REGISTRATION_FAILED`. An existing, **unverified** email has its password and name overwritten and gets a fresh verification email.
+- **Login** checks, in order: user exists → password matches → `is_active` → `email_verified`. The first two failures return the same `INVALID_CREDENTIALS`. Deactivation and unverified status are revealed only after a correct password, so they do not enable email enumeration.
+- **Session resolution** (`resolveSession`, every authenticated request): hash the cookie → load the session with its user → reject if revoked, expired, or the user is inactive. One DB round trip per request.
+- **Logout** revokes exactly the session behind the presented cookie. **Device list** (`GET /auth/sessions`) shows active sessions; `DELETE /auth/sessions/:id` revokes one owned by the caller.
+- **Change password** (signed in) verifies the current password, sets the new hash, and revokes **every other** session while keeping the current one.
+- **Password reset** is non-enumerating: the request always answers the same message. Confirming sets the new hash, marks the token used, and **revokes all sessions**.
+- **Resend verification** is likewise non-enumerating.
+- **Email delivery.** If `RESEND_API_KEY` is unset, `sendEmail` logs the message (including the link) to the backend console instead of sending, so flows work end to end in development.
+
+### 5.3 Bootstrapping the first admin
+
+There is deliberately no HTTP endpoint for it. `npm run bootstrap:admin -- --email=… --password=… --name=…` (`scripts/bootstrap-admin.ts`) refuses to run if any admin already exists and upserts the account with `role = admin` and the default quota. Further admins are promoted through the admin API.
+
+**As built, the script does not set `email_verified`, so the bootstrapped admin cannot log in** until that flag is set (e.g. by SQL). See §17 #2.
+
+### 5.4 Deactivation and deletion
+
+- **Deactivate** (admin): sets `is_active = false`, revokes all the user's sessions, and logs. Nothing else is mutated. Effects follow from live checks: sessions stop resolving, the user's public links stop working (creator-active check), and grants the user made stop counting (granter-active check).
+- **Reactivate**: sets `is_active = true`. Everything resumes with no other write.
+- **Delete**: `delete_account()` (DESIGN.md §6.7). See §8.9.
 
 ---
 
-*This document is a first-pass application-layer design intended to sit alongside DESIGN.md and REQUIREMENTS.md as a complete picture of the system (data model, product requirements, and now application architecture). It should not be treated as final — see §10 — and the next step is the same kind of adversarial review DESIGN.md underwent, followed by writing out the concrete API schemas §10 item #7 flags as not yet done.*
+## 6. Authorization
+
+### 6.1 Layers
+
+1. **Authentication**: a valid session (`requireSession`).
+2. **Admin gate**: every `/admin/*` route additionally uses `requireAdmin` (session + `role = admin`), returning `403 INSUFFICIENT_PERMISSION` otherwise.
+3. **Item permission**: `checkPermission(userId, itemType, itemId, requiredRole)` in `access/permission-check.ts`. The admin role short-circuits to *allow* before any lookup. Otherwise the highest role from the direct grant and every ancestor folder grant wins. See DESIGN.md §8.2 for the algorithm.
+
+### 6.2 Who can do what
+
+| Action | Requires |
+|---|---|
+| List folder contents, download, preview, thumbnail, favorite, list own tags on an item | `viewer` |
+| Create in a folder, rename, move, trash, restore, purge, upload into a folder, tag | `editor` (moves also need `editor` on the destination) |
+| Grant or revoke access, create or list share links and collaborators | `editor`, and a grant may not exceed the actor's own role |
+| Transfer ownership | Current owner, or an admin |
+| Revoke a share link | The link's own **creator** (not the owner, unless they created it) |
+| Quota, role, deactivate, system limit, backup, mail, stats | Admin |
+
+### 6.3 Sharing rules as implemented
+
+- **Grant:** self-grant and granting to the item's owner are silent no-ops. Granting to someone with an existing grant keeps the **higher** of the two roles. The grantee id is not validated up front, so a nonexistent id surfaces as a generic 500 (the UI resolves emails through `/users/lookup` first).
+- **Revoke:** deletes non-owner grants; the owner row can never be touched here.
+- **Dynamic folder sharing:** a folder grant applies to everything currently inside it and anything added later, because resolution walks ancestors at check time.
+- **Highest wins** across direct and inherited grants.
+- **Public links:** see §8.7.
+
+### 6.4 Admin bypass
+
+Because the bypass lives inside `checkPermission`, admins can read, download, move and trash anyone's items through the *ordinary* endpoints, as well as through `/admin/users/:id/files`. Auditing differs by path: the admin browse endpoint logs `view` (once per 30 minutes per admin-and-user pair). Ordinary endpoints log their normal action (`download`, `rename`, …) with the admin as `actor_id` and the item owner as `subject_user_id`. Passive reads through ordinary listing endpoints are not logged.
+
+---
+
+## 7. HTTP API reference
+
+Base path `/api/v1`. JSON in and out unless stated. "Auth" is *session* (cookie), *admin* (session + admin role), or *public*. Success bodies are shown compactly. Errors always use §4.4's shape.
+
+**Rate limits** (details in §13.3): the global default is 300 requests per minute per session; "unauth" routes are limited to 20 per 15 minutes per source address; "write" routes to 60 per minute; "backup" routes to 3 per 10 minutes; "none" is exempt from the route-level limit (the global limiter still applies unless noted).
+
+### 7.1 Accounts and sessions (`accounts`)
+
+| Method and path | Auth | Rate | Body / query | Success |
+|---|---|---|---|---|
+| `POST /auth/register` | public | unauth | `{email, password(≥8), displayName}` | 201 `{user:{id,email,display_name,created_at}}` |
+| `POST /auth/login` | public | unauth | `{email, password}` | 200 `{user:{id,email,displayName,role}}` + `Set-Cookie` |
+| `POST /auth/logout` | session | | | 204, cookie cleared |
+| `GET /auth/me` | session | | | `{user:{id,email,displayName,role}}` |
+| `POST /auth/verify-email` | public | global | `{token}` | `{message}` |
+| `POST /auth/resend-verification` | public | unauth | `{email}` | `{message}` (always) |
+| `POST /auth/password-reset/request` | public | unauth | `{email}` | `{message}` (always) |
+| `POST /auth/password-reset/confirm` | public | global | `{token, newPassword}` | `{message}` |
+| `POST /auth/change-password` | session | | `{currentPassword, newPassword}` | 204 |
+| `GET /auth/sessions` | session | | | `{sessions:[{id,device_info,created_at,expires_at}]}` |
+| `DELETE /auth/sessions/:sessionId` | session | | | 204 or `SESSION_NOT_FOUND` |
+| `GET /users/me/storage` | session | | | `{storageUsedBytes, storageQuotaBytes}` (strings) |
+| `GET /users/me/storage-breakdown` | session | | | `{categories:[{category: documents\|images\|videos, bytes}]}` |
+| `GET /users/lookup?email=` | session | | | `{user:{id,email,displayName}}` or `404` |
+| `PATCH /users/me` | session | | `{displayName}` | `{user}` |
+| `DELETE /users/me` | session | | | 204, cookie cleared (self-service deletion) |
+
+`/users/lookup` reveals whether an email is registered. That is deliberate (sharing needs it) but usable for enumeration by any signed-in user.
+
+### 7.2 Filesystem (`filesystem`)
+
+| Method and path | Auth | Rate | Notes |
+|---|---|---|---|
+| `GET /folders/contents` | session | | Caller's root: their own root folders and files |
+| `GET /folders/:id/contents` | session | | Needs `viewer`. Returns `{folder:{id,name,parentFolderId}, ancestors:[{id,name}], items}` |
+| `POST /folders` | session | write | `{name, parentFolderId?}` → 201 `{folder}` |
+| `PATCH /folders/:id` | session | write | `{name?, parentFolderId?}` (rename and/or move) → `{folder}` |
+| `DELETE /folders/:id` | session | write | Trash the subtree → 204 |
+| `GET /folders/:id/download-zip` | session | none | Streamed `application/zip`, needs `viewer` |
+| `PATCH /files/:id` | session | write | `{name?, folderId?}` → `{file}` |
+| `DELETE /files/:id` | session | write | Trash → 204 |
+| `GET /files/:id/download` | session | | `{url}` presigned, 300 s; logs `download` |
+| `GET /files/:id/preview` | session | | `{available:true,url,mimeType}` or `{available:false}` |
+| `GET /files/:id/thumbnail` | session | | `{available:true,url}` or `{available:false}` |
+| `POST /files` | session | write | Start upload: `{targetFolderId?, targetName, totalParts}` → 201 `{uploadSessionId, expiresAt}` |
+| `PUT /files/upload-sessions/:id/parts/:n` | session | none | Raw `application/octet-stream` body (≤ 10 MiB); `n` is **0-based** → 204 |
+| `POST /files/upload-sessions/:id/complete` | session | | `{mimeType?}` → `{file}` |
+| `DELETE /files/upload-sessions/:id` | session | | Cancel → 204 |
+
+Folder-content items are `{id,name,type,updatedAt}` plus, for files, `sizeBytes` and `mimeType`, and for folders, recursive `sizeBytes` and `fileCount`. Items in a listing are sorted with folders first, then by name, on the server. The web client re-sorts and filters client-side (§10.5).
+
+### 7.3 Sharing (`access`)
+
+| Method and path | Auth | Notes |
+|---|---|---|
+| `POST /items/:type/:id/permissions` | session | `{userId, role: viewer\|editor}` → 204. `:type` is `file` or `folder`. |
+| `DELETE /items/:type/:id/permissions/:userId` | session | 204 |
+| `GET /items/:type/:id/permissions` | session | `{collaborators:[{userId,email,displayName,role}]}`, needs `editor` |
+| `GET /shared-with-me` | session | `{items:[{id,type,name,role}]}`: **direct grants only** |
+| `POST /items/:type/:id/transfer-ownership` | session | `{newOwnerId}` → 204 (owner or admin) |
+| `POST /items/:type/:id/share-links` | session | `{role, password?, expiresAt?}` → 201 `{token,id}` |
+| `GET /items/:type/:id/share-links` | session | `{links:[{id,token,role,hasPassword,expiresAt,createdBy,createdAt}]}`, needs `editor` |
+| `DELETE /share-links/:id` | session | Creator only → 204 |
+| `GET /public/share-links/:token` | public | `?password=&folderId=` → `{name,role,folderId,parentFolderId,isRoot,items}` |
+| `GET /public/share-links/:token/files/:fileId/download` | public | `?password=` → `{url}` |
+| `GET /public/share-links/:token/files/:fileId/preview` | public | `{available,…}` |
+| `GET /public/share-links/:token/files/:fileId/thumbnail` | public | `{available,url?}` |
+| `GET /public/share-links/:token/folders/:folderId/download-zip` | public | Streamed ZIP, rate limit none |
+
+Public routes pass the password as a **query parameter** (§13.5).
+
+### 7.4 Trash (`trash`)
+
+| Method and path | Auth | Rate | Notes |
+|---|---|---|---|
+| `GET /trash` | session | | `{items:[{id,name,type,deletedAt}]}`: everything the caller **owns** that is trashed, each descendant listed individually |
+| `POST /trash/:type/:id/restore` | session | write | Needs `editor`; refused with `PURGE_IN_FLIGHT` if a purge is queued |
+| `DELETE /trash/:type/:id` | session | write | "Delete forever": enqueue purge; item must be trashed (`NOT_IN_TRASH`) |
+
+### 7.5 Organize and search
+
+| Method and path | Auth | Rate | Notes |
+|---|---|---|---|
+| `GET /favorites` | session | | Lazily pruned list (DESIGN.md §8.4) |
+| `POST` / `DELETE /items/:type/:id/favorite` | session | write | Idempotent; 204 |
+| `GET /tags` | session | | `{tags:[…]}` (own only) |
+| `POST /tags` | session | write | `{name, color?}` → 201 `{tag}`; duplicate name → `NAME_COLLISION` |
+| `PATCH /tags/:id` | session | write | `{color}` only; no rename |
+| `DELETE /tags/:id` | session | write | Cascades to `item_tags` |
+| `GET /tags/:id/items` | session | | Live, visible items carrying the tag |
+| `GET /items/:type/:id/tags` | session | | The caller's own tags on the item |
+| `POST /items/:type/:id/tags` | session | write | `{tagId}`; needs `editor` on the item and ownership of the tag |
+| `DELETE /items/:type/:id/tags/:tagId` | session | write | Needs only ownership of the tag |
+| `GET /search?q=` | session | | Up to 50 results, name `ILIKE '%q%'`, ordered by name; owned items and directly granted items only |
+
+### 7.6 Admin (`admin`, all require the admin role)
+
+| Method and path | Rate | Notes |
+|---|---|---|
+| `GET /admin/users` | | `{users:[{id,email,displayName,role,isActive,storageUsedBytes,storageQuotaBytes}]}` (numbers) |
+| `PATCH /admin/users/:id/quota` | write | `{quotaBytes: integer ≥ 0}` → 204. Limited by unallocated system storage. |
+| `PATCH /admin/users/:id/role` | write | `{role: user\|admin}` → 204. Last-admin protected. |
+| `POST /admin/users/:id/deactivate` | write | 204 |
+| `POST /admin/users/:id/reactivate` | write | 204 |
+| `DELETE /admin/users/:id` | write | Optional `{replacementOwnerId}` (one user receives **all** items); 204 |
+| `GET /admin/users/:id/files` | | `?folderId=` browse a user's files. Logs `view`. |
+| `GET /admin/users/:id/storage-breakdown` | | Same shape as the user's own |
+| `GET /admin/stats` | | `{totalUsers, totalStorageUsedBytes}` |
+| `GET /admin/system-storage` | | `{totalStorageLimitBytes, totalStorageUsedBytes, totalStorageAllocatedBytes}` |
+| `PATCH /admin/system-storage` | write | `{totalStorageLimitBytes}` → 204. Cannot go below allocated quotas. |
+| `GET /admin/system-storage-breakdown` | | System-wide category breakdown |
+| `GET /admin/activity` | | Latest **200** `{id,action,actorId,subjectUserId,createdAt}` |
+| `GET /admin/failed-jobs` | | Deletion-queue rows stuck in `failed` |
+| `POST /admin/backup` | backup | Copy the whole bucket into a new backup bucket |
+| `GET /admin/backups` | | Available backup buckets, newest first |
+| `POST /admin/backups/:name/restore` | backup | Copy a backup bucket's objects over the live bucket |
+| `POST /admin/send-email` | write | `{to, subject, body}` (plain text, HTML-escaped) |
+| `GET /admin/received-emails` | | Latest 200 inbound messages + inbound address |
+
+### 7.7 Email webhook and health
+
+| Method and path | Auth | Notes |
+|---|---|---|
+| `POST /email/inbound` | Svix signature | Rejects everything with 401 when `RESEND_WEBHOOK_SECRET` is unset. Ignores non-inbound event types with 204. Idempotent on `Message-ID`. |
+| `GET /health` | public | `{status:"ok"}` |
+
+---
+
+## 8. Key mechanisms
+
+### 8.1 Name handling and path limits
+
+Every name is NFC-normalized and trimmed before use, and rejected if empty or over 255 UTF-8 bytes (`normalize.ts`). Create, rename, move and upload also check that the root-to-item name path stays within 4096 bytes by walking `parent_folder_id` upward, one query per level. Sibling collisions are detected by the database's unique index and mapped to `NAME_COLLISION`. The upload path additionally pre-checks for a live same-named file, to fail before any bytes move.
+
+### 8.2 Folder move (highest-risk operation)
+
+```
+moveOrRenameFolder(user, folder, {name?, parentFolderId?}):
+  load folder (live) ; require editor on folder                       (else 404)
+  if reparenting: reject parent == self (CYCLE_DETECTED)
+                  require editor on the new parent
+  check name/path budget
+  transaction:
+    if rename only: UPDATE name
+    else:
+      pg_advisory_xact_lock(hashtext(a), hashtext(b))   # a,b = sorted(folderId, newParentId)
+      (root target: single-key lock on folderId)
+      re-read the folder inside the lock
+      target parent must be live; if target == folder or target.materialized_path
+          contains "/<folderId>/"  → CYCLE_DETECTED
+      UPDATE folder (name, parent, materialized_path = targetPath + id + "/")
+      UPDATE descendants: materialized_path = newPrefix || substring(old, len(oldPrefix)+1)
+  log move|rename
+```
+
+Locking both ids in sorted order prevents two opposing moves from both passing the cycle check (DESIGN.md §7.4). The subtree rewrite happens in the same transaction, so descendant paths are never stale after a move.
+
+**As built:** the second half of REQUIREMENTS.md's move-authorization rule is missing. An editor who is not the owner can move a shared item somewhere that removes other users' access. File moves are simple updates of `folder_id` with the same permission checks, and the same gap.
+
+### 8.3 Upload pipeline
+
+The client cuts the file into **5 MiB** parts, uploads them through the backend, and finalizes. The design points:
+
+- **Charge as you go.** Each part atomically increments the owner's `storage_used_bytes` only if it stays within quota (`UPDATE … WHERE used + Δ ≤ quota RETURNING`). Over quota → `QUOTA_EXCEEDED` at that part, not after assembly. The system-cap trigger can raise `SYSTEM_STORAGE_LIMIT_EXCEEDED`. If the storage write fails after charging, the charge is refunded immediately.
+- **Idempotent parts.** A retried part number already recorded is a no-op with no double charge.
+- **Destination guard.** Before every part and at completion, the destination folder must still be live and writable, and the target name must still be free, else the session is aborted (`UPLOAD_SESSION_INVALID`, quota credited back). A concurrent rename, trash or collision cannot make an upload land somewhere unexpected.
+- **Finalize.** All `total_parts` parts must be present. The `files` row is inserted (`complete`), the parts are composed server-side into `files/<random>`, temp parts are removed, the owner permission is inserted, a thumbnail is enqueued when the type is image, video or PDF, and `upload` is logged.
+- **Abort** (cancel, expiry, failed finalization): credit back the sum of accepted parts, delete temp objects, mark the session `aborted`. Expired sessions are aborted by a worker every 5 minutes.
+- **Pre-flight failure** returns before any bytes: a name collision on init is rejected immediately.
+
+Limits and caveats: the expiry is fixed at session creation (default 60 min) and is not extended by progress, so a very large upload on a slow link can expire mid-transfer. Part numbers are 0-based. The `files` row is inserted before composition, so a compose failure leaves a row without a blob (§17 #11).
+
+### 8.4 Download, preview and thumbnails
+
+All three return **presigned MinIO URLs** built against the public endpoint, valid 300 seconds. Authorization and liveness (`deleted_at IS NULL`, `upload_status = 'complete'`) are checked once when the URL is issued. An in-flight transfer may finish after a rename, move or trash (the object is immutable). New requests after trashing fail at once with `NO_LONGER_AVAILABLE`.
+
+- Downloads set `Content-Disposition: attachment; filename*=UTF-8''…` and log `download`.
+- Previews use `inline` and override the content type. They are offered for `image/*`, `video/*`, `audio/*`, and `application/pdf`; anything else yields `{available:false}`, a normal state rather than an error. Previews are not logged as downloads.
+- **Thumbnails** (`image/*`, `video/*`, PDF) are generated in the background (§9.3). `{available:false}` covers not-thumbnailable, still generating, and failed alike.
+- **Folder ZIP:** built lazily with `archiver` (compression level 9). Each file streams from MinIO into the archive as it is appended, so a large folder does not sit in memory. The response starts immediately. Access is `viewer` on the top folder only. Descendants are authorized structurally. Trashed items are excluded. The public variant enforces link scope instead of a user check.
+
+### 8.5 Trash, restore and purge
+
+- **Trash** sets `deleted_at` on the item, or on the whole subtree for a folder, in one transaction. Trashed items still count against quota.
+- **Restore** puts an item back in its original parent if that parent is live, otherwise at the owner's root. A folder restore also revives every descendant that is still trashed and not mid-purge. Files without a ready thumbnail are re-enqueued. **Defect:** re-parenting to root does not rewrite the folder's `materialized_path`, which can later cause a live folder to be purged (§17 #1).
+- **Purge** ("delete forever" or the hourly 30-day scan) enqueues `deletion_queue` rows through an idempotent guard. The worker deletes blobs, then in one transaction removes the item and its polymorphic references and credits quota back. Five failed attempts park a row as `failed` for the admin page.
+- Each item's 30-day clock is independent. A descendant force-deleted early is not resurrected by restoring an ancestor.
+- `GET /trash` lists **every** trashed item the caller owns, including each descendant of a trashed folder as its own row.
+
+### 8.6 Storage accounting
+
+Three limits interact (DESIGN.md §9): per-user quota, per-user usage, and a system-wide limit that also **pre-allocates** quotas. The application layer contributes the atomic per-part charge (§8.3) and the translation of database exceptions into the distinct errors in §4.4. Admin rules:
+
+- Quota may be set to 0 and lowered below usage. Raising it is bounded by unallocated system storage (`SYSTEM_STORAGE_ALLOCATION_EXCEEDED`, with the maximum available reported in GB).
+- The system limit may not fall below total allocated quotas (`STORAGE_LIMIT_BELOW_ALLOCATION`).
+- New registrations start with `DEFAULT_USER_QUOTA_BYTES` (15 GiB) and are refused when unallocated space cannot cover it.
+- The UI displays quotas in decimal gigabytes (×1e9) on admin pages, while defaults are binary GiB (15 × 1024³). Values round-trip approximately.
+
+### 8.7 Public share links
+
+Creation requires `editor` and a role not above the creator's own. The token is 32 random bytes (base64url). A password, if given, is bcrypt-hashed. `expiresAt` is optional.
+
+Every public request runs `resolveShareLink`:
+
+1. Link exists; **its creator is active**; not expired (all failures look identical: `404 NOT_FOUND`).
+2. If password-protected: apply the per-token throttle (10 consecutive failures in a 15-minute window locks the token out, even for the correct password, until the window lapses), then verify. A missing password counts as a failure.
+3. Then `isWithinSharedScope` confines the request to the linked subtree. A visitor can browse down from the linked folder, never above it. `parentFolderId` is null at the root so the UI shows no "up" link.
+
+A file-type link lists just that one file. Public routes offer only browse, download, preview, thumbnail and ZIP. There is no public write, so `editor` links currently equal `viewer` links (§17 #9). Creators can list links on an item; only the creator can revoke one.
+
+### 8.8 Favorites, tags, search
+
+- **Favorites** require `viewer` and a live item; toggling is idempotent. The list is resolved lazily and stale rows are deleted on read (deviation from REQUIREMENTS.md §5.7 for reversible loss, §17 #5).
+- **Tags** are private per user (unique by `(owner, name)`). Applying needs `editor` on the item and ownership of the tag; removing needs only tag ownership; `GET /tags/:id/items` silently skips items that no longer resolve.
+- **Search** is a single `ILIKE '%term%'` over files and folders, unioned, ordered by name, limited to 50, live items only, over items the caller owns or is **directly** granted. Items reachable only through a shared ancestor are not found (§17 #5).
+
+### 8.9 Account lifecycle
+
+- **Deactivate / reactivate:** §5.4.
+- **Delete:** the API resolves the replacement owner (self-service: oldest active admin other than the user; admin: the given `replacementOwnerId` or that default), then calls `delete_account()`. It logs `account_delete` afterwards with email, display name and the new owner, since the user row is gone. No admin available returns `NO_SYSTEM_ADMIN`. Deleting the last admin returns `LAST_ADMIN`.
+- **Effects of deletion:** the user's owned items pass to the replacement (with byte accounting), their shares, links, tags, favorites, sessions and pending uploads disappear, and activity history is preserved.
+
+### 8.10 Activity logging
+
+`logActivity` writes one row per meaningful action with actor and subject. It is called *after* the action succeeds and outside its transaction, so a crash between the two can lose a log row. Admin `view` events are de-duplicated with a 30-minute window per pair. Actions and their subjects follow DESIGN.md §5.13. Item-level rows are kept forever. The admin activity endpoint returns the newest 200 with no filtering, and the stats page derives its charts from that same window.
+
+### 8.11 Backup and restore
+
+`POST /admin/backup` creates a bucket `dbase-backup-<timestamp>` and server-side-copies every object into it, logging `backup_run` with the count. `POST /admin/backups/:name/restore` re-validates the name against the current backup list, copies every object back over the live bucket without deleting extras, and logs `backup_restore`. Both are limited to 3 per 10 minutes. **They cover objects only, not Postgres**, so they are not a complete backup (§17 #13). They also run synchronously inside one HTTP request, which can time out on large stores.
+
+### 8.12 Inbound and outbound email
+
+- **Outbound** uses Resend's HTTPS API through a single `sendEmail` function, wrapped in a branded HTML shell (`emailTemplate.ts`). Admin-composed mail is plain text, HTML-escaped, with paragraph breaks preserved.
+- **Inbound:** Resend delivers `email.received` webhooks (metadata only). The handler verifies the Svix signature over the raw bytes, then calls Resend's receiving API to fetch the body, headers and attachment list, and stores a row (`received_emails`). Duplicates are ignored, but a redelivery that now carries a body backfills the earlier metadata-only row. Attachment **bytes are not stored**. The admin page renders HTML bodies in a fully sandboxed `<iframe sandbox="">`.
+
+---
+
+## 9. Background workers
+
+All workers are `setInterval` loops inside the API process, started after the server begins listening. Each has an in-memory overlap guard so a slow tick is never re-entered. There is no leader election. **Running two backend replicas would double-run the timers.** The claim queries use `SKIP LOCKED`, so queue processing itself is safe, but the upload-session cleanup and the retention scan are not designed for concurrency (§11.4).
+
+| Worker | Interval | Work | Retry / failure |
+|---|---|---|---|
+| `upload-session-cleanup` | 5 min | Abort `pending` sessions past `expires_at`: credit back, remove temp parts, mark `aborted` | Errors logged; next tick retries |
+| `deletion-queue` (drain) | 60 s | Claim ≤ 20 `pending` rows → `processing`; remove blobs; transaction: delete references and item, credit quota, mark `done` | Up to 5 attempts, then `failed` (visible at `/admin/failed-jobs`) |
+| `deletion-queue` (scan) | 60 min | Enqueue every live-trashed item older than `TRASH_RETENTION_DAYS` (30) | Idempotent guard makes repeats safe |
+| `thumbnail-queue` | 30 s | Claim ≤ 10 rows; load source into memory; generate; **re-check the file is still live** before writing; store JPEG; mark file `ready` | Up to 3 attempts, then `failed`; file marked `failed` |
+
+### 9.1 Deletion ordering guarantee
+
+Blob removal comes first and is idempotent. A crash before the database transaction leaves the row `processing`. **Nothing re-claims `processing` rows**, so a crash after a claim strands that row until someone resets it manually (§17 #20). Quota is credited only in the same transaction that deletes the row, so accounting never goes ahead of reality.
+
+### 9.2 Thumbnail generation
+
+- **Images:** `sharp` resize to fit 320×320 (no enlargement), JPEG quality 70.
+- **Video:** `ffmpeg -ss 1 -i … -frames:v 1`, 30-second timeout, then the same resize.
+- **PDF:** `pdftoppm -jpeg -r 100 -f 1 -l 1` for page 1, 30-second timeout, then the same resize.
+- The whole source object is read **into memory** before processing, which is expensive for large videos.
+- An unsupported codec is an acceptable, silent `failed`, and the file remains fully usable.
+- Restoring a file whose thumbnail is not `ready` re-enqueues generation. If it was already `ready`, it is simply served again.
+
+### 9.3 Not implemented
+
+The original design included an `effective_permissions` rebuild worker and a reconciliation/repair job for the denormalized values. Neither exists (§17 #8, #12).
+
+---
+
+## 10. Web client
+
+The client is a Next.js 15 App Router app under `web/`, built as a standalone server.
+
+### 10.1 Rendering strategy
+
+Almost every page is a **client component**. The data is per-user and mutated in the same session, which is TanStack Query's domain, so server rendering would only add a round trip. The exceptions are the marketing landing page (server-rendered markup with a client-side redirect component for signed-in users) and the auth pages' shells.
+
+### 10.2 Route map
+
+| Route | Purpose | Main API calls |
+|---|---|---|
+| `/` | Landing page; redirects signed-in users to `/home` | none |
+| `/login`, `/register` | Auth forms (login offers "resend verification") | `/auth/login`, `/auth/register`, `/auth/resend-verification` |
+| `/verify-email` | Consume the emailed token | `/auth/verify-email` |
+| `/password-reset/request`, `/confirm` | Reset flow | `/auth/password-reset/*` |
+| `/s/[token]` | **Public** share page: password prompt, browse, preview, download, ZIP; list/grid, filter and sort | `/public/share-links/*` |
+| `/home` | Storage-capacity card (ring chart), folder cards, recent files | `/users/me/storage`, `/storage-breakdown`, `/folders/*/contents` |
+| `/folders`, `/folders/[folderId]` | The file browser | `/folders/*`, `/files/*`, `/favorites`, upload endpoints |
+| `/search` | Name search | `/search`, `/favorites` |
+| `/shared-with-me` | Items shared with the user | `/shared-with-me` |
+| `/favorites` | Starred items | `/favorites` |
+| `/tags` | Manage tags; browse items by tag | `/tags`, `/tags/:id/items` |
+| `/trash` | Restore or delete forever | `/trash`, `/trash/:type/:id/*` |
+| `/settings/sessions` | Device list and revoke | `/auth/sessions` |
+| `/settings/account` | Profile, change password, delete account | `/users/me`, `/auth/change-password` |
+| `/admin/users` | Users table: quota, role, deactivate/reactivate, delete | `/admin/users*` |
+| `/admin/users/[userId]` | Browse a user's files (browse-only) | `/admin/users/:id/files` |
+| `/admin/stats` | System charts, per-user breakdown | `/admin/system-storage*`, `/admin/users`, `/admin/activity` |
+| `/admin/activity` | Activity table | `/admin/activity` |
+| `/admin/system-storage` | View and edit the system limit | `/admin/system-storage` |
+| `/admin/backup` | Run backup, restore from a backup | `/admin/backup*` |
+| `/admin/send-mail`, `/admin/received-mail` | Compose mail; read inbound mail | `/admin/send-email`, `/admin/received-emails` |
+| `/admin/failed-jobs` | Failed deletion jobs | `/admin/failed-jobs` |
+
+`/admin/failed-jobs` exists but is **not linked** from the sidebar (§17 #21).
+
+### 10.3 Layout and gating
+
+- `app/layout.tsx`: fonts, an inline script that sets `data-theme` before hydration (avoids a theme flash), and `Providers` (TanStack `QueryClient` with `retry: 1`, `staleTime: 30 s`, then `AuthProvider`).
+- `(auth)/layout.tsx`: redirects **away** to `/home` if already signed in.
+- `(app)/layout.tsx`: redirects **to** `/login` if not signed in; renders the sidebar (Home, My Files, Shared with me, Favorites, Trash; Search, Tags, Devices, Account; and, for admins, Users, Stats, Activity, Storage Limit, Backup, Send Mail, Received Mail), a quota indicator, the sign-out button, the theme toggle, and the `UploadProvider` and `UploadTray`.
+- `admin/layout.tsx`: redirects non-admins to `/folders`.
+- **Both gates are client-side only.** There is no middleware or server-side session check, so a signed-in user may briefly see the login form (and vice versa) before `AuthProvider` resolves. This is a cosmetic flash, not a security gap: data access is enforced by the API's own 401s.
+
+### 10.4 State and data flow
+
+- **Server state:** TanStack Query, keys centralized in `lib/query-keys.ts`. Mutations invalidate the queries they affect by hand (for example, a move invalidates the source and destination folder listings). This list is maintained manually.
+- **Auth state:** `AuthProvider` holds the current user (from `GET /auth/me`). A global 401 handler clears it. **When the signed-in user id changes, every other query in the cache is reset**, so user B never sees user A's cached data on a shared browser tab.
+- **Local UI state:** component state (dialogs, selection, filters). No global store.
+- **No token storage:** the httpOnly cookie is invisible to JavaScript. `localStorage` holds only preferences (`dbase:theme`, `dbase:view-preference`) and upload-session ids (below).
+- **API client** (`lib/api-client.ts`): the single place that builds requests. It prefixes `/api/v1`, sends `credentials: "include"`, parses the error envelope into a typed `ApiError(status, code, message, retryAfterSeconds)`, and calls the global 401 handler. Callers branch on `code`.
+
+### 10.5 The file browser
+
+`components/files/folder-browser.tsx` (about 800 lines) provides:
+
+- List and grid views (persisted preference), breadcrumbs from the `ancestors` array, thumbnails for supported types.
+- **Client-side** name search, type filter (all, folders, images, videos, audio, files) and six sort orders (name, size, modified). Folders always sort ahead of files. This satisfies the "sort by name or recency" requirement, but only over the rows the server already returned.
+- Multi-select with bulk Move, Download (files only) and Delete.
+- **Drag from the OS to upload** into the current folder, and **drag an item onto a folder to move it**.
+- Row menu: Rename, Move (folder picker), Tags, Share, Download (folder → ZIP), Delete; a star toggle favorites an item and clicking a file opens the preview modal.
+- Modals: New folder, Rename, Move, Share, Tags, New tag, and a File preview modal. The Share modal grants by email (resolved through `/users/lookup`), lists and revokes collaborators, creates and lists links (optional password and expiry) and transfers ownership.
+
+### 10.6 Uploads (`lib/uploads.tsx`)
+
+`UploadProvider` and the bottom-right `UploadTray` drive uploads:
+
+- 5 MiB parts; at most **3 concurrent** uploads; per-task status (queued, uploading, paused, error, complete, canceled) with pause, resume, cancel and dismiss.
+- **429 handling:** each request retries up to 5 times, waiting for `Retry-After` (or 5 s) plus jitter, unless the user paused.
+- On any failure the client aborts the server session, so quota is released promptly.
+- On completion it invalidates the storage-usage and destination-folder queries.
+- **Resume after a page refresh is not implemented.** The upload session id is written to `localStorage` on creation and cleared on finish, but nothing reads it back. Pause and resume work only within the same page lifetime. Uploads in flight during a reload are abandoned and cleaned up by the server after expiry.
+
+### 10.6.1 Public share page (`/s/[token]`)
+
+A separate, unauthenticated experience in the same app. It asks for a password when the link requires one, browses the shared subtree with the same list/grid, filter and sort controls, previews and downloads files, and downloads a folder as ZIP. The password is remembered only in component state and re-sent as a query parameter on each request.
+
+### 10.7 Styling and theming
+
+Tailwind with local shadcn-style components (`components/ui`: button, input, password-input, select-menu, color-picker, ring and multi-ring charts). Two themes selected by `data-theme`: the default "alt" (warm amber skin) and "default". The choice is stored in `localStorage`.
+
+---
+
+## 11. Deployment and operations
+
+### 11.1 Topology
+
+One Ubuntu host runs everything under `docker-compose.yml`:
+
+| Service | Image | Port | Notes |
+|---|---|---|---|
+| `backend` | built from `Dockerfile` | `PORT` (3000) | Loads `.env` wholesale (`env_file`) plus a few remapped variables. `depends_on` MinIO healthy. |
+| `frontend` | built from `web/Dockerfile` | `FRONTEND_PORT` (3001) | Standalone Next.js server. |
+| `minio` | `quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` | `MINIO_PORT` (9000), console `MINIO_CONSOLE_PORT` (9001) | Data volume `minio-data`; SSE-S3 KMS key from env; healthcheck `mc ready local`. |
+| `minio-init` | `quay.io/minio/mc:…` | none | One-shot: creates the `dbase` bucket and turns on default encryption (`mc encrypt set sse-s3`); idempotent. |
+
+Postgres is **not** in the compose file: it is the external Supabase project.
+
+### 11.2 Images
+
+- **Backend** (multi-stage `node:22-slim`): `deps` (`npm ci`, `prisma generate`), `build` (`tsc`), `runtime`. The runtime installs `ffmpeg` and `poppler-utils` and ships **full** `node_modules` (including dev dependencies) so `tsx` can run `bootstrap:admin` and `migrate` inside the container. It copies `dist/`, `prisma/`, `scripts/` and `supabase/migrations/`. The Prisma generator lists both `native` and `debian-openssl-3.0.x` binary targets. Start command: `node dist/src/server.js`.
+- **Frontend** (multi-stage): builds with Next's `standalone` output and copies only `.next/standalone`, `.next/static` and `public`. It sets `HOSTNAME=0.0.0.0` (otherwise Docker's auto-set `HOSTNAME` makes Next bind only the container's own IP and the published port refuses connections).
+
+### 11.3 The reverse-proxy decision
+
+`web/next.config.js` defines a `rewrites()` rule mapping `/api/v1/:path*` to `${BACKEND_URL}/api/v1/:path*`. It is a rewrite, not a hand-written route handler, because a rewrite forwards the request (including `Cookie`) unmodified by construction. **`rewrites()` is evaluated once at `next build`.** `BACKEND_URL` is therefore a **Docker build argument** (`docker-compose.yml` `build.args`, default `http://backend:${PORT}`), not a runtime variable. Changing the backend address requires rebuilding the frontend image. This was a real bug found by running the built containers.
+
+The alternative of setting `SameSite=None` on the cookie was rejected: it would weaken CSRF posture for a problem the proxy solves cleanly.
+
+### 11.4 Single-instance assumption
+
+Rate limiting uses in-process memory and the workers use in-process timers with in-memory overlap guards. Both assume **exactly one backend process**. Horizontal scaling is out of scope. Doing it would need a shared rate-limit store, a single elected worker (or lock-guarded timers) and a reconsidered cleanup design.
+
+### 11.5 Database migrations and CI/CD
+
+- SQL migrations in `supabase/migrations/` are applied by `scripts/migrate.ts` in filename order, one transaction per file, recorded in a `_migrations` table. Re-running is a no-op.
+- `.github/workflows/deploy.yml` (on push to `main`, `runs-on: self-hosted`):
+  1. Checkout with `clean: false` (preserves the host's untracked `.env`).
+  2. `docker compose build`.
+  3. `docker compose run --rm backend npm run migrate` (runs *before* restart, so the schema is ready before new code serves traffic).
+  4. `docker compose up -d --remove-orphans`.
+  5. `docker image prune -f`.
+- **There is no test, lint or typecheck step in CI**, and no rollback step. A failed migration aborts the deploy before restart, leaving the previous containers running. Migrations are forward-only, so a rollback of code that depends on a new migration must be done by hand.
+
+### 11.6 First-time setup
+
+1. Copy `.env.example` to `.env` and fill in Supabase URLs, MinIO credentials, the KMS key, public MinIO and app URLs, and (optionally) Resend keys.
+2. `npm install && npm run migrate && npm run prisma:generate`.
+3. `docker compose up --build`.
+4. `docker compose exec backend npm run bootstrap:admin -- …` (see §5.3 for the caveat).
+
+---
+
+## 12. Configuration reference
+
+All configuration comes from one repository-root `.env`, read by the backend (`dotenv`), by `docker-compose.yml` (auto-loaded), and by the frontend's build and dev scripts. `src/config.ts` fails fast when `DATABASE_URL`, `MINIO_ACCESS_KEY` or `MINIO_SECRET_KEY` is missing.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | required | Supabase **pooled** (transaction mode, port 6543) connection string. Used by the app *and* migrations. |
+| `DIRECT_URL` | | Direct (5432, IPv6-only) URL for `prisma db pull` only |
+| `PORT` / `FRONTEND_PORT` | 3000 / 3001 | Each drives both container port and published host port |
+| `SESSION_COOKIE_NAME` | `dbase_session` | |
+| `SESSION_TTL_DAYS` | 30 | Session lifetime |
+| `DEFAULT_USER_QUOTA_BYTES` | 16106127360 (15 GiB) | Quota for new accounts |
+| `PASSWORD_RESET_TTL_MINUTES` | 30 | |
+| `EMAIL_VERIFICATION_TTL_HOURS` | 24 | |
+| `UPLOAD_SESSION_TTL_MINUTES` | 60 | Fixed upload-session lifetime |
+| `TRASH_RETENTION_DAYS` | 30 | Per-item retention before automatic purge |
+| `PUBLIC_APP_URL` | `http://localhost:3001` | Base for links in emails; **must** be the real public frontend URL in production |
+| `RESEND_API_KEY` | unset | Unset means emails are logged, not sent |
+| `EMAIL_FROM` | `onboarding@resend.dev` | Test domain only delivers to the account owner |
+| `RESEND_WEBHOOK_SECRET` | unset | Unset means inbound webhook rejects everything (401) |
+| `EMAIL_INBOUND_ADDRESS` | `dbase@nishit-db.com` | Display label only |
+| `MINIO_ENDPOINT`, `MINIO_PORT`, `MINIO_USE_SSL` | `localhost`, 9000, false | Backend → MinIO (compose sets the host to `minio`). A scheme in the endpoint is stripped and infers SSL. |
+| `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | required | Compose maps them from `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` |
+| `MINIO_BUCKET` | `dbase` | Compose hardcodes `dbase`, so a different value in `.env` is ignored under Docker |
+| `MINIO_PUBLIC_ENDPOINT`, `MINIO_PUBLIC_PORT`, `MINIO_PUBLIC_USE_SSL` | fall back to the internal values | The host a **browser** reaches MinIO on, used to sign presigned URLs. **Must be set for any non-local deployment.** |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | required (compose) | MinIO admin credentials |
+| `MINIO_CONSOLE_PORT` | 9001 | |
+| `MINIO_KMS_SECRET_KEY` | required (compose) | `name:base64(32 bytes)`; use a different key per environment; no rotation support |
+| `BACKEND_URL` | `http://backend:${PORT}` | **Build-time** frontend proxy target |
+
+---
+
+## 13. Security considerations
+
+### 13.1 Summary of controls
+
+| Threat | Control |
+|---|---|
+| Credential theft from a database leak | bcrypt passwords; hashed session, reset and verification tokens |
+| XSS reading the session | `httpOnly` cookie; no token in JS-accessible storage |
+| CSRF | `SameSite=Lax`; state changes use non-GET methods; same-origin proxy. No CSRF tokens. |
+| Unauthorized file access | Central `checkPermission`; non-guessable object keys; no public bucket policy; short-lived presigned URLs |
+| Direct DB API exposure (Supabase) | RLS on, zero policies |
+| Function search-path hijack | `search_path` pinned on all functions |
+| Brute force on share-link passwords | Per-token throttle (10 per 15 minutes) |
+| Forged inbound mail | Svix HMAC, timestamp window, constant-time compare, fail-closed when unset |
+| Stored-HTML XSS from inbound mail | Rendered in a fully sandboxed iframe |
+| Injection into admin outbound mail | Body HTML-escaped |
+| Quota abuse and races | Atomic conditional update plus DB triggers |
+| Last-admin lockout | DB trigger |
+
+### 13.2 Data at rest
+
+Object data is encrypted with MinIO SSE-S3 for objects written after it was enabled. Postgres encryption is Supabase's concern. Secrets live in `.env` on the host and are passed to containers through the environment.
+
+### 13.3 Rate limiting
+
+| Bucket | Limit | Key |
+|---|---|---|
+| Global default | 300 / minute | SHA-256 of the session cookie, else client IP |
+| Unauthenticated routes (register, login, reset request, resend verification) | 20 / 15 minutes | Client IP |
+| Write routes (folder/file mutations, trash restore and purge, favorites, tags, some admin) | 60 / minute | Session |
+| Backup and restore | 3 / 10 minutes | Session |
+| Upload part `PUT`, ZIP downloads | exempt from the route limit | Bounded by session lifecycle and folder size |
+
+State is in process memory. `429` responses carry `Retry-After`, and the client honors it for uploads.
+
+**Important limitation: the server does not enable Fastify's `trustProxy`.** Every request reaches Fastify through the Next.js rewrite, so `request.ip` is the frontend container's address for all users. All unauthenticated traffic, including logins from every real user and every anonymous share-link visitor, therefore shares **one** bucket: 20 login attempts per 15 minutes in total for the whole deployment, and 300 requests per minute across all public-link traffic. This is severe for any multi-user use (§17 #3). Fix: enable `trustProxy` for the frontend hop and have the rewrite forward `X-Forwarded-For`.
+
+### 13.4 Accepted risks
+
+- **Admin bypass** is total by design and only partly audited (§6.4).
+- **`/users/lookup`** enables email enumeration by any signed-in user.
+- **Presigned URLs** are bearer credentials for 5 minutes. A leaked URL grants access until it expires.
+- **No MFA, no account lockout** beyond rate limits (explicit non-goals).
+- **Sessions are fixed-lifetime** with no idle timeout or rotation.
+- **A compromised host or operator** can read everything (documented trust model).
+
+### 13.5 Known weaknesses to address
+
+- Public share passwords travel in the **query string** (`?password=`), which is commonly logged by proxies and visible in browser history. Moving them to a header or POST body would fix it.
+- The 404-versus-403 distinction is inconsistent across modules (§4.4).
+- Backup and restore run synchronously in a request and act on the object store only.
+- Rate-limit IP keying (§13.3).
+
+---
+
+## 14. Observability and operations
+
+- **Logs:** Fastify request/error logs and worker `console` lines on the backend container's stdout (`docker compose logs backend`). Every worker tick that does work logs a count; permanent failures log an error with the item id.
+- **Health:** `/health` is liveness only.
+- **Admin visibility:** the activity page, the failed-jobs page (deletion queue), the system-storage page (limit, used, allocated) and the stats page.
+- **Not present:** metrics, tracing, alerting, structured audit export, dashboards for the thumbnail queue, requeue tools for failed or stranded jobs.
+- **Runbook notes:** bootstrap the first admin with the script (and fix `email_verified`, §5.3); back up Postgres separately from the object-store backup; keep the same `MINIO_KMS_SECRET_KEY` for the life of the data; set `MINIO_PUBLIC_*` and `PUBLIC_APP_URL` to real public values when deploying beyond localhost.
+
+---
+
+## 15. Testing
+
+Tests use Node's built-in runner: `npm test` (`node --import tsx --test src/**/*.test.ts`). The only tests are unit tests in `src/lib/` (`password.test.ts`, `tokens.test.ts`). **There are no tests for services, routes, database functions, triggers, or the web client**, and CI does not run tests, lint or the frontend typecheck (`web`'s `typecheck` and `lint` scripts are not invoked). Concurrency-sensitive code (folder-move locking, quota races, queue claiming, ownership transfer) is therefore unverified by automation.
+
+Suggested first targets, by risk: folder move race; quota race across parts; `transfer_ownership` and `delete_account`; restore, purge and path interaction (§17 #1); share-link throttle and scope; `resolveEffectiveRole` with deactivated granters.
+
+---
+
+## 16. Requirements traceability
+
+Status: **Done** (matches), **Partial** (implemented with a gap), **Missing**, **Extra** (beyond requirements).
+
+| REQUIREMENTS.md | Status | Notes |
+|---|---|---|
+| §5.1 Open registration, unique email, non-enumerating error, ≥ 8-char password, default quota | Done | Plus email verification (Extra) |
+| §5.1 Multi-device sessions, per-device logout | Done | Sessions page |
+| §5.1 Self-service password reset | Done | |
+| §5.1 First-admin mechanism | Partial | Script exists; the admin it creates cannot log in (§17 #2) |
+| §5.1 Deactivation (sessions, links, shares suspended; reversible) | Done | Live checks, not data changes |
+| §5.1.1 Deletion with reassignment; default and admin-chosen owner | Done | Admin picks **one** replacement for all items, not per item |
+| §5.2 Folders: nesting, name and path limits, uniqueness, cycle prevention | Partial | Uniqueness is per owner (§17 #6) |
+| §5.3 Upload, multipart, cancel, destination guards | Done | |
+| §5.3 Resume after interruption | Partial | Server supports it; client cannot resume after refresh (§10.6) |
+| §5.3 Download, rename, move, name-collision rejection | Done | |
+| §5.3 Move-authorization "no stripping others' access" | Missing | §17 #4 |
+| §5.3 Search by name, partial and case-insensitive | Partial | Direct grants and owned only; 50-row cap |
+| §5.4 Trash, restore, per-item 30-day clock, delete forever, restore-to-root | Partial | Defect in restore-to-root (§17 #1) |
+| §5.5 Grant, revoke, immediate enforcement | Done | Synchronous resolution, no stale cache |
+| §5.5 "Shared with me" including folder-inherited items | Partial | Direct grants only (§17 #5) |
+| §5.5 Public links, password, expiry, throttle, creator-scoped lifetime | Done | |
+| §5.5 Editor-level public links | Partial | Accepted but no write endpoints (§17 #9) |
+| §5.5 Folder ZIP download | Extra | Was deferred in requirements |
+| §5.5 Highest-permission-wins; ownership transfer | Done | |
+| §5.6 Quotas: 0 valid, lower below usage, per-part enforcement, trash counts until purge | Done | Plus system limit and pre-allocation (Extra) |
+| §5.7 Favorites, lazy visibility | Partial | Deleted, not hidden, on reversible loss (§17 #5b) |
+| §5.8 Personal tags | Done | Rename not supported |
+| §5.9 Thumbnails (image, video, PDF), background, delete-race safe, restore behavior | Done | |
+| §5.10 Admin: view any files (logged), stats, quotas, roles, lifecycle, ownership | Done | |
+| §5.10 Usage-frequency data | Partial | Aggregation function exists but no endpoint or page uses it |
+| §5.11 Pagination | Missing | §17 #7 |
+| §5.11 Explicit empty states | Done | Implemented in the UI |
+| §5.11 Default sort by name, sort by recency | Done | Client-side |
+| §5.12 Distinct quota vs permission errors | Done | Specific error codes |
+| §5.13 Activity log with actor and subject | Done | Includes admin `view`, plus system and backup actions |
+| §6 Deletion reliability with retry and surfacing | Done | Stranded `processing` rows are not recovered (§17 #20) |
+
+---
+
+## 17. Known gaps and open items
+
+Ranked by severity. Items marked **defect** are reasoned from the code and should be reproduced before fixing. DESIGN.md §13 lists the data-layer view of the same issues.
+
+| # | Severity | Item | Where and fix |
+|---|---|---|---|
+| 1 | **High, defect** | **Restore-to-root can lead to purging live data.** Re-parenting a folder to root on restore leaves its `materialized_path` pointing under the old ancestors. Later, purging that ancestor enqueues every path-prefixed folder (no `deleted_at` filter), including the restored live folder. Permissions also wrongly inherit from the old ancestors. | `trash/restore-service.ts` (rewrite subtree paths on re-parent) and `trash/deletion-queue-service.ts` (`enqueueFolderSubtreeForPurge`: restrict to trashed rows) |
+| 2 | **High, defect** | **Bootstrapped admin cannot log in** because `email_verified` defaults to false. | `scripts/bootstrap-admin.ts`: set `email_verified: true` on create and update |
+| 3 | **High** | **Rate limiter sees one client IP** (no `trustProxy`), so all unauthenticated users share one bucket; also affects public-link traffic. | `server.ts`: enable `trustProxy`; forward `X-Forwarded-For` from Next |
+| 4 | Medium | Move can strip others' access (owner-only rule missing). | `folder-service.ts`, `file-service.ts` |
+| 5 | Medium | (a) "Shared with me" and search ignore folder-inherited access. (b) Favorites deleted on reversible access loss. | `permission-service.ts`, `search-service.ts`, `favorite-service.ts` |
+| 6 | Medium | Sibling-name uniqueness is per owner, not per folder. | Unique indexes (migration) and `upload-service` collision check |
+| 7 | Medium | No pagination; hard caps on search (50), activity (200), mail (200). | All list endpoints |
+| 8 | Medium | Every permission check is several uncached queries; `effective_permissions` is dead. Either build the cache or drop the table. | `permission-check.ts` |
+| 9 | Low | Editor share links have no additional capability. | Decide: implement public write, or restrict link creation to viewer |
+| 10 | Low | `usage frequency` aggregation is unused; stats derive from a 200-row activity window. | `audit-service.ts`, `admin/stats` |
+| 11 | Medium | Upload finalization is not atomic across DB and object store. | `upload-service.completeUpload` |
+| 12 | Medium | No reconciliation job for `storage_used_bytes` and `materialized_path`. | New worker |
+| 13 | Medium | Backup covers the object store only, and runs inside a request. | `backup-service.ts`; add a `pg_dump` story |
+| 14 | Medium | Upload session lifetime is fixed; slow large uploads can expire mid-flight. | Extend `expires_at` on each accepted part |
+| 15 | Medium | Client cannot resume uploads after a refresh (session id stored, never read). | `web/lib/uploads.tsx` |
+| 16 | Medium | Public share password in the query string. | Public routes and `/s/[token]` |
+| 17 | Low | CI lacks tests, lint and typecheck; no rollback. | `.github/workflows/deploy.yml` |
+| 18 | Low | `requireSession` duplicated across seven route files. | Extract to a shared module or Fastify decorator |
+| 19 | Low | `GET /health` does not verify Postgres or MinIO. | `server.ts` |
+| 20 | Medium | A worker crash after claiming leaves rows `processing` forever. Nothing resets stale claims or requeues `failed` rows. | Both queue services; add a lease timeout and an admin requeue action |
+| 21 | Low | `/admin/failed-jobs` is not linked in the sidebar. | `web/app/(app)/layout.tsx` |
+| 22 | Low | Unknown grantee id on `POST …/permissions` yields a 500 instead of a 404. | `permission-service.grantPermission` |
+| 23 | Low | Inconsistent 404/403 semantics; a mix of string and numeric byte serialization in admin payloads. | API-wide |
+| 24 | Low | Several file-header comments are stale (e.g. "no admin failed-deletions view yet", deactivation-aware favorites). | `deletion-queue-service.ts`, `favorite-service.ts` |
+| 25 | Low | Docker-compose comments still say the storage module "isn't built." | `docker-compose.yml` |
+| 26 | Info | Uncommitted work in the tree: migration 0022 (pre-allocation), quota-related admin and account changes, and admin-page edits. | `git status` |
+
+---
+
+## 18. Appendix: repository layout
+
+```
+.
+├── docker-compose.yml       backend, frontend, minio, minio-init
+├── Dockerfile               backend image (ffmpeg + poppler, full node_modules)
+├── .github/workflows/deploy.yml
+├── .env.example             the single config file for everything
+├── package.json             backend deps and scripts (dev, build, start, test, migrate, bootstrap:admin, prisma:*)
+├── prisma/schema.prisma     Prisma mirror of the DB (DDL truth is in supabase/migrations)
+├── supabase/migrations/     0001 … 0022 (forward-only SQL)
+├── scripts/                 bootstrap-admin.ts, migrate.ts
+├── src/                     backend (see §4.1)
+├── web/                     Next.js app
+│   ├── app/                 routes: (auth), (app), s/[token], landing
+│   ├── components/          files/ (browser, modals, tray), ui/ (primitives, charts)
+│   ├── lib/                 api-client, auth, query-keys, uploads, formatting, hooks
+│   ├── Dockerfile           standalone image (BACKEND_URL build arg)
+│   └── next.config.js       output standalone + /api/v1 rewrite
+└── docs/                    REQUIREMENTS, DESIGN (database), APPLICATION_DESIGN (this file),
+                             FRONTEND_DESIGN, IMPLEMENTATION_PHASES
+```
+
+*When behavior changes, update the affected section here, the matching row in §16 and §17, and DESIGN.md if the schema is involved.*
