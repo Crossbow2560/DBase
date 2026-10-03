@@ -6,7 +6,12 @@
 
 **Why:** a single host is the deployment target. One process keeps transactions, logging and deployment simple. Modules are still isolated behind two choke points, `checkPermission()` for authorization and `storage/client.ts` for object storage, so splitting them out later wouldn't mean rewriting call sites.
 
-**Trade-off:** the design assumes a single instance. The rate-limit store is in-process memory, and the workers rely on in-memory overlap guards. Queue claims use `FOR UPDATE SKIP LOCKED`, so queue processing itself is multi-instance safe. Rate limits, however, would under-count across replicas.
+**Trade-off: exactly one backend instance is supported.** Running replicas is not a configuration option today, for two concrete reasons:
+
+- **Rate limits are per process.** `@fastify/rate-limit` uses its in-memory store, so N replicas would each allow the full budget — login brute-force protection, share-link unlock limits and the per-IP ceiling would all be N× weaker.
+- **Workers run in every process.** Each instance starts all three `setInterval` workers. Queue claims use `FOR UPDATE SKIP LOCKED` and session aborts use conditional updates, so duplicated workers stay *correct*, but they multiply database polling for no benefit.
+
+Scaling out would mean a shared rate-limit store (`@fastify/rate-limit` supports Redis) and running workers in one dedicated process. Until then, scale vertically. The backend logs this constraint at startup.
 
 ## SQL migrations as the schema source of truth, Prisma for queries only
 
@@ -44,11 +49,11 @@
 
 ## Synchronous permission resolution, no cache
 
-**Decision:** `resolveEffectiveRole()` walks the folder ancestor chain on every check, using `materialized_path` to find ancestors. The `effective_permissions` table exists but isn't read.
+**Decision:** `resolveEffectiveRole()` resolves every check with one SQL query: the item's direct grant plus grants on every ancestor folder (taken from the parent's `materialized_path`), joined to `users` so grants from deactivated granters don't count. The `effective_permissions` table exists but isn't read.
 
 **Why:** the design requires correct synchronous fallback anyway, so skipping the cache costs only read performance, not correctness. It also makes revocation and deactivation take effect immediately. A grant stops working as soon as its `granted_by` user is deactivated, without any invalidation step.
 
-**Trade-off:** each check costs several queries. `search` and `shared-with-me` only list items with a **direct** grant. Items reachable only through an inherited folder share are accessible but don't appear in those lists.
+**Trade-off:** each check costs two round trips (the admin-role lookup and the grant query) rather than a cache read. `search` uses the same rule, so it finds anything inside a shared folder. "Shared with me" deliberately lists only top-level shares, as in Google Drive; their contents are reached by opening them.
 
 ## Opaque sessions in an httpOnly cookie behind a same-origin proxy
 
@@ -107,7 +112,7 @@
 - Denied item access returns 404, not 403.
 - An unverified account's email can be re-registered, which overwrites the unverified row, so abandoned signups don't block the address forever.
 
-**Exception:** `GET /users/lookup` intentionally resolves emails, because sharing requires it.
+**Exception:** `GET /users/lookup` intentionally resolves emails, because sharing requires it. It's limited to 30 lookups a minute per session so it can't be used to sweep a list of addresses.
 
 ## Single shared `.env`
 

@@ -1,9 +1,9 @@
 // Applies every not-yet-applied file under supabase/migrations/, in filename order (the numeric
 // prefix is the ordering — same convention the files already follow), and records each one in a
 // `_migrations` bookkeeping table so re-running this script is a no-op once everything is caught
-// up. README.md still calls this "applied through the Supabase dashboard/CLI" — this script is
-// what now does that automatically, wired into .github/workflows/deploy.yml's deploy step, run
-// once per push to main, before the rebuilt containers start serving traffic.
+// up. Wired into .github/workflows/deploy.yml's deploy step — run once per push to main, before the
+// rebuilt containers start serving traffic — and reused by the integration-test harness
+// (test/integration/harness.ts) through applyMigrations().
 //
 // Talks to the database with a plain `pg` client, not Prisma's $executeRawUnsafe: several
 // migrations (0001, 0002, 0008, 0015) define trigger functions with `$$`-quoted bodies containing
@@ -32,14 +32,22 @@ import { Client } from "pg";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.join(__dirname, "..", "supabase", "migrations");
 
-async function main() {
-  const connectionString = process.env.DATABASE_URL ?? process.env.DIRECT_URL;
-  if (!connectionString) {
-    console.error("Missing DATABASE_URL/DIRECT_URL — nothing to connect to.");
-    process.exit(1);
-  }
-
-  const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith(".sql")).sort();
+/**
+ * Applies every not-yet-applied migration to the database at `connectionString`. Exported so the
+ * integration-test harness (test/integration/harness.ts) migrates its throwaway database through
+ * exactly the same code path deploys use.
+ */
+export async function applyMigrations(
+  connectionString: string,
+  log: (message: string) => void = console.log,
+  options: { stopAfter?: string } = {},
+): Promise<number> {
+  // stopAfter: apply files up to and including this one — lets tests seed data against an older
+  // schema and then exercise a specific migration's data fix-ups.
+  const files = (await readdir(MIGRATIONS_DIR))
+    .filter((f) => f.endsWith(".sql"))
+    .sort()
+    .filter((f) => !options.stopAfter || f <= options.stopAfter);
 
   const client = new Client({ connectionString });
   await client.connect();
@@ -60,7 +68,7 @@ async function main() {
       if (applied.has(file)) continue;
 
       const sql = await readFile(path.join(MIGRATIONS_DIR, file), "utf8");
-      console.log(`Applying ${file}...`);
+      log(`Applying ${file}...`);
 
       // One transaction per file: either the whole migration lands and gets recorded, or neither
       // does — never a half-applied file silently marked as done.
@@ -71,18 +79,31 @@ async function main() {
         await client.query("commit");
       } catch (err) {
         await client.query("rollback");
-        throw err;
+        throw new Error(`Migration ${file} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       ranCount++;
     }
-
-    console.log(ranCount === 0 ? "Database already up to date." : `Applied ${ranCount} migration(s).`);
+    return ranCount;
   } finally {
     await client.end();
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+async function main() {
+  const connectionString = process.env.DATABASE_URL ?? process.env.DIRECT_URL;
+  if (!connectionString) {
+    console.error("Missing DATABASE_URL/DIRECT_URL — nothing to connect to.");
+    process.exit(1);
+  }
+
+  const ranCount = await applyMigrations(connectionString);
+  console.log(ranCount === 0 ? "Database already up to date." : `Applied ${ranCount} migration(s).`);
+}
+
+// Only run when executed as a script (npm run migrate), not when imported by the test harness.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

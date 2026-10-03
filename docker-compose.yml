@@ -40,9 +40,8 @@ services:
       # RESEND_WEBHOOK_SECRET / EMAIL_INBOUND_ADDRESS (inbound mail, src/modules/email/routes.ts)
       # are not listed here on purpose — they flow in through env_file above, straight from .env.
       PORT: ${PORT:-3000}
-      # Not consumed by any code yet — the `storage` module (APPLICATION_DESIGN.md §3.2,
-      # IMPLEMENTATION_PHASES.md Subcomponent 1) that will actually talk to MinIO isn't built.
-      # Present now so the container topology and secrets are already in place when it is.
+      # How the backend itself reaches MinIO (src/modules/storage/client.ts): the compose service
+      # name over the Docker-internal network. Never handed to a browser — see MINIO_PUBLIC_* below.
       MINIO_ENDPOINT: minio
       MINIO_PORT: ${MINIO_PORT:-9000}
       # The Docker-internal MinIO container talks plain HTTP over the compose network — this has
@@ -70,6 +69,10 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+      # The backend reads and writes the `dbase` bucket from its first request (uploads, the
+      # thumbnail worker), so it must not start before minio-init has created it.
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   frontend:
@@ -145,10 +148,9 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # One-shot: ensures the app's bucket exists, then exits. `depends_on: service_healthy` on the
-  # other services only waits for minio to be *up*, not for this bucket to exist — nothing
-  # currently reads from the bucket yet (see the backend's MINIO_* comment above), so no service
-  # depends on minio-init completing. Wire that dependency in once the storage module lands.
+  # One-shot: ensures the app's bucket exists (with default encryption), then exits. The backend
+  # waits for it via `condition: service_completed_successfully` — `service_healthy` on minio alone
+  # only guarantees MinIO is up, not that the bucket exists.
   minio-init:
     image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
@@ -167,6 +169,46 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_PORT: ${MINIO_PORT:-9000}
+
+  # ---------------------------------------------------------------------------------------------
+  # Integration-test services (`npm run test:db:up`) — only started with `--profile test`, never by
+  # a plain `docker compose up`. Throwaway by design: data lives in tmpfs and nothing here touches
+  # the real Supabase database or the app's MinIO bucket. The harness (test/integration/harness.ts)
+  # creates a fresh database per test file and applies supabase/migrations/ to it.
+  # ---------------------------------------------------------------------------------------------
+  test-db:
+    profiles: ["test"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dbase_test
+      POSTGRES_PASSWORD: dbase_test
+      POSTGRES_DB: postgres
+    ports:
+      - "${TEST_DB_PORT:-54329}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "dbase_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  test-minio:
+    profiles: ["test"]
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --address ":9000"
+    environment:
+      MINIO_ROOT_USER: dbase_test
+      MINIO_ROOT_PASSWORD: dbase_test_secret
+    ports:
+      - "${TEST_MINIO_PORT:-59000}:9000"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
 volumes:
   minio-data:

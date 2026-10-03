@@ -20,24 +20,29 @@ There is also an unversioned `GET /health` → `{"status":"ok"}`.
 
 | Status | Codes |
 |---|---|
-| 400 | `VALIDATION_ERROR`, `WEAK_PASSWORD`, `REGISTRATION_FAILED`, `NAME_TOO_LONG`, `PATH_TOO_LONG`, `NOT_A_FOLDER`, `INVALID_RESET_TOKEN`, `INVALID_VERIFICATION_TOKEN`, `INVALID_JSON`, `INVALID_EMAIL`, `INVALID_SUBJECT`, `INVALID_BODY` |
-| 401 | `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `INVALID_PASSWORD` (share link), `INVALID_SIGNATURE`, `INBOUND_NOT_CONFIGURED` |
+| 400 | `VALIDATION_ERROR`, `PART_TOO_SMALL`, `WEAK_PASSWORD`, `REGISTRATION_FAILED`, `NAME_TOO_LONG`, `PATH_TOO_LONG`, `NOT_A_FOLDER`, `INVALID_RESET_TOKEN`, `INVALID_VERIFICATION_TOKEN`, `INVALID_JSON`, `INVALID_EMAIL`, `INVALID_SUBJECT`, `INVALID_BODY` |
+| 401 | `UNAUTHENTICATED`, `INVALID_CREDENTIALS`, `PASSWORD_REQUIRED` / `INVALID_PASSWORD` (share link), `INVALID_SIGNATURE`, `INBOUND_NOT_CONFIGURED` |
 | 403 | `ACCOUNT_DEACTIVATED`, `EMAIL_NOT_VERIFIED`, `INSUFFICIENT_PERMISSION`, `REGISTRATION_CLOSED` |
 | 404 | `NOT_FOUND` (also returned when you lack access, so existence isn't leaked), `SESSION_NOT_FOUND`, `UPLOAD_SESSION_NOT_FOUND`, `NO_LONGER_AVAILABLE` |
 | 409 | `NAME_COLLISION`, `CYCLE_DETECTED`, `NOT_IN_TRASH`, `PURGE_IN_FLIGHT`, `UPLOAD_SESSION_INVALID`, `LAST_ADMIN`, `NO_SYSTEM_ADMIN`, `SYSTEM_STORAGE_ALLOCATION_EXCEEDED` |
 | 422 | `QUOTA_EXCEEDED`, `SYSTEM_STORAGE_LIMIT_EXCEEDED` |
-| 429 | `RATE_LIMITED`. The global limiter sends a `Retry-After` header; share-link password lockouts reuse this code. |
+| 429 | `RATE_LIMITED` (comes with a `Retry-After` header) |
 | 500 | `INTERNAL_ERROR` |
 
 ### Rate limits
 
+The client IP is taken from `X-Forwarded-For` as appended by trusted proxy hops (`TRUST_PROXY`); the Next.js frontend is always one of them.
+
 | Class | Limit | Key |
 |---|---|---|
+| Ceiling (every request) | 1200 / min (`RATE_LIMIT_PER_IP_PER_MINUTE`) | client IP |
 | Default (all routes) | 300 / min | session cookie hash, or IP |
 | register, login, password-reset request, resend-verification | 20 / 15 min | IP |
 | Write-heavy (create, move, rename, delete, tags, favorites, admin mutations) | 60 / min | session |
 | Admin backup and restore | 3 / 10 min | session |
-| Upload parts, folder zip downloads | none | — |
+| Public share-link routes, inbound email webhook | 300 / min | client IP |
+| Public share-link folder zip | 10 / min | client IP |
+| Upload parts, authenticated folder zip downloads | none (ceiling still applies) | — |
 
 ---
 
@@ -100,12 +105,12 @@ SID=$(curl -sb jar -H 'Content-Type: application/json' \
   -d '{"targetName":"photo.jpg","totalParts":1}' \
   http://localhost:3000/api/v1/files | jq -r .uploadSessionId)
 curl -b jar -X PUT -H 'Content-Type: application/octet-stream' --data-binary @photo.jpg \
-  http://localhost:3000/api/v1/files/upload-sessions/$SID/parts/1
+  http://localhost:3000/api/v1/files/upload-sessions/$SID/parts/0
 curl -b jar -H 'Content-Type: application/json' -d '{"mimeType":"image/jpeg"}' \
   http://localhost:3000/api/v1/files/upload-sessions/$SID/complete
 ```
 
-Parts are 1-indexed, and `complete` fails with `UPLOAD_SESSION_INVALID` unless all `totalParts` parts have been received. Sessions expire after `UPLOAD_SESSION_TTL_MINUTES` (60).
+Parts are **0-indexed** (`0 … totalParts-1`); every part except the last must be at least 5 MiB, because MinIO's compose step requires it. `complete` fails with `UPLOAD_SESSION_INVALID` unless all `totalParts` parts have been received. Sessions expire after `UPLOAD_SESSION_TTL_MINUTES` (60).
 
 ## Sharing and access
 
@@ -116,23 +121,24 @@ Parts are 1-indexed, and `complete` fails with `UPLOAD_SESSION_INVALID` unless a
 | DELETE | `/items/:type/:id/permissions/:userId` | 🔒 | — | `204` |
 | POST | `/items/:type/:id/transfer-ownership` | 🔒 | `{ newOwnerId }` | `204` |
 | GET | `/shared-with-me` | 🔒 | — | `{ items }` |
-| GET | `/items/:type/:id/share-links` | 🔒 | — | `{ links }` |
-| POST | `/items/:type/:id/share-links` | 🔒 | `{ role, password?, expiresAt? (ISO) }` | `201 { token, id }` |
+| GET | `/items/:type/:id/share-links` | 🔒 | — | `{ links: [{ id, role, hasPassword, expiresAt, createdBy, createdAt }] }` (no tokens: only their hashes are stored) |
+| POST | `/items/:type/:id/share-links` | 🔒 | `{ role, password?, expiresAt? (ISO) }` | `201 { token, id }`: the only time the raw token is returned |
 | DELETE | `/share-links/:id` | 🔒 | — | `204` (only the link's creator can revoke it) |
 
 Granting or creating a link requires editor access or higher, and you can't hand out a role higher than your own.
 
 ### Public share links (no session)
 
-The optional `?password=` query parameter is required when the link has a password. After 10 wrong attempts in 15 minutes the link is temporarily locked.
+A password-protected link answers `401 PASSWORD_REQUIRED` until unlocked. `POST /public/share-links/:token/unlock` with `{ "password": "…" }` checks the password once and sets an httpOnly cookie (`dbase_share_unlock`, signed, valid up to 12 h or the link's expiry) scoped to that link's API path; the browser then sends it with every request below. Passwords are never accepted in the URL. Unlock attempts are limited to 10 per 15 minutes per client IP and link, so guessing from one client never locks out other visitors.
 
-| Method | Path | Query | Response |
+| Method | Path | Query / body | Response |
 |---|---|---|---|
-| GET | `/public/share-links/:token` | `password?`, `folderId?` | Item or folder contents (folder browsing stays inside the shared subtree) |
-| GET | `/public/share-links/:token/files/:fileId/download` | `password?` | `{ url }` |
-| GET | `/public/share-links/:token/files/:fileId/preview` | `password?` | `{ available, ... }` |
-| GET | `/public/share-links/:token/files/:fileId/thumbnail` | `password?` | `{ available, url? }` |
-| GET | `/public/share-links/:token/folders/:folderId/download-zip` | `password?` | Streamed zip |
+| POST | `/public/share-links/:token/unlock` | `{ password }` | `204` + cookie, `401 INVALID_PASSWORD`, `429` |
+| GET | `/public/share-links/:token` | `folderId?` | Item or folder contents (folder browsing stays inside the shared subtree) |
+| GET | `/public/share-links/:token/files/:fileId/download` | — | `{ url }` |
+| GET | `/public/share-links/:token/files/:fileId/preview` | — | `{ available, ... }` |
+| GET | `/public/share-links/:token/files/:fileId/thumbnail` | — | `{ available, url? }` |
+| GET | `/public/share-links/:token/folders/:folderId/download-zip` | — | Streamed zip |
 
 A link stops working if it expires, if the item is trashed, or if its creator is deactivated.
 
@@ -163,7 +169,7 @@ A link stops working if it expires, if the item is trashed, or if its creator is
 
 | Method | Path | Auth | Response |
 |---|---|---|---|
-| GET | `/search?q=term` | 🔒 | `{ items }`: case-insensitive substring match on owned and directly-shared, non-trashed items |
+| GET | `/search?q=term` | 🔒 | `{ items }` (max 50): case-insensitive substring match on non-trashed items the user can open — owned, shared directly, or inside a shared folder |
 
 ## Admin
 

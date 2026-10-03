@@ -3,8 +3,8 @@
 // credentials: "include" is enough to carry the httpOnly session cookie — no manual header
 // wiring, no cross-origin concerns (§7).
 
-// Mirrors the codes the backend actually raises (src/modules/accounts/errors.ts) plus the ones
-// APPLICATION_DESIGN.md §4.1/§4.3 documents for endpoints not built yet. Unrecognized codes
+// Mirrors the codes the backend raises (src/modules/*/errors.ts; the full list is in docs/api.md)
+// that callers commonly branch on. Unrecognized codes
 // still work (ApiError.code is `string`, this union is documentation or by callers, not a
 // runtime allowlist) — falling back to a generic toast is the caller's choice, not enforced here.
 export type KnownErrorCode =
@@ -25,6 +25,8 @@ export type KnownErrorCode =
   | "PATH_TOO_LONG"
   | "NAME_TOO_LONG"
   | "CYCLE_DETECTED"
+  | "PART_TOO_SMALL"
+  | "UPLOAD_SESSION_INVALID"
   | "RATE_LIMITED"
   | "INTERNAL_ERROR";
 

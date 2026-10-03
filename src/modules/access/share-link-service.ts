@@ -1,8 +1,8 @@
 import { db } from "../../db.js";
-import { generateToken } from "../../lib/tokens.js";
+import { generateToken, hashToken } from "../../lib/tokens.js";
 import { hashPassword, verifyPassword } from "../../lib/password.js";
 import { checkPermission, resolveEffectiveRole, type ItemType, type Role } from "./permission-check.js";
-import { insufficientPermission, shareLinkNotFound, invalidSharePassword, tooManyPasswordAttempts } from "./errors.js";
+import { insufficientPermission, shareLinkNotFound, invalidSharePassword, sharePasswordRequired } from "./errors.js";
 import { logActivity } from "../admin/audit-service.js";
 import * as storage from "../storage/client.js";
 import { isPreviewable } from "../filesystem/file-service.js";
@@ -10,8 +10,6 @@ import { isThumbnailable } from "../thumbnails/thumbnail-service.js";
 import { buildFolderZipArchive } from "../filesystem/folder-service.js";
 
 const ROLE_RANK: Record<Role, number> = { viewer: 1, editor: 2, owner: 3 };
-const PASSWORD_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
-const MAX_PASSWORD_ATTEMPTS = 10;
 
 /** DESIGN.md §3.6: the same granting-authority check as a direct PERMISSIONS grant. */
 export async function createShareLink(
@@ -34,7 +32,9 @@ export async function createShareLink(
     data: {
       item_type: itemType,
       item_id: itemId,
-      token,
+      // Only the hash is stored (supabase/migrations/0024); the raw token is returned to the
+      // creator once, below, and never again.
+      token_hash: hashToken(token),
       role,
       password_hash: passwordHash,
       expires_at: options.expiresAt ?? null,
@@ -51,7 +51,7 @@ export async function createShareLink(
     action: "create_share_link",
   });
 
-  return link;
+  return { id: link.id, token };
 }
 
 export async function revokeShareLink(actingUserId: string, shareLinkId: string): Promise<void> {
@@ -87,7 +87,6 @@ export async function listShareLinksForItem(actingUserId: string, itemType: Item
 
   return links.map((link) => ({
     id: link.id,
-    token: link.token,
     role: link.role,
     hasPassword: link.password_hash !== null,
     expiresAt: link.expires_at?.toISOString() ?? null,
@@ -97,46 +96,53 @@ export async function listShareLinksForItem(actingUserId: string, itemType: Item
 }
 
 /**
+ * Proof that a visitor entered a password-protected link's password: the decoded value of the
+ * signed, httpOnly unlock cookie set by unlockShareLink()'s route. Only ever built from a cookie
+ * whose signature checked out (access/routes.ts), so its fields can be trusted.
+ */
+export interface UnlockGrant {
+  linkId: string;
+  expiresAt: number; // epoch ms
+}
+
+// How long one successful unlock lasts (capped further by the link's own expiry).
+export const UNLOCK_TTL_MS = 12 * 60 * 60 * 1000;
+
+/**
  * DESIGN.md §3.8: every access attempt joins to users on created_by and checks is_active —
  * a deactivated creator's links are denied, application-layer, no DB backstop (accepted risk,
- * DESIGN.md §4.3). Also enforces the password-attempt throttle (10 failures / 15-minute window,
- * keyed on the token itself) when the link is password-protected.
+ * DESIGN.md §4.3).
  */
-export async function resolveShareLink(token: string, password?: string) {
-  const link = await db.share_links.findUnique({ where: { token }, include: { creator: true } });
+async function findLiveShareLink(token: string) {
+  const link = await db.share_links.findUnique({ where: { token_hash: hashToken(token) }, include: { creator: true } });
   if (!link || !link.creator.is_active) throw shareLinkNotFound();
   if (link.expires_at && link.expires_at < new Date()) throw shareLinkNotFound();
+  return link;
+}
 
+/**
+ * Checks a password-protected link's password once and returns the grant for the unlock cookie,
+ * or null when the link has no password (nothing to unlock).
+ *
+ * The password used to travel as a ?password= query parameter on every request, which put it
+ * into server/proxy logs and browser history. Brute-force protection is now a per-client-IP limit
+ * on this endpoint (access/routes.ts) instead of the old per-link failure counter, which let
+ * anyone holding the URL lock every legitimate visitor out by failing ten times.
+ */
+export async function unlockShareLink(token: string, password: string): Promise<UnlockGrant | null> {
+  const link = await findLiveShareLink(token);
+  if (!link.password_hash) return null;
+  if (!(await verifyPassword(password, link.password_hash))) throw invalidSharePassword();
+  const cap = link.expires_at ? link.expires_at.getTime() : Infinity;
+  return { linkId: link.id, expiresAt: Math.min(Date.now() + UNLOCK_TTL_MS, cap) };
+}
+
+/** Resolves a public link for access, requiring a valid unlock grant if it has a password. */
+export async function resolveShareLink(token: string, grant: UnlockGrant | null) {
+  const link = await findLiveShareLink(token);
   if (link.password_hash) {
-    const now = new Date();
-    const windowExpired =
-      !link.failed_attempts_window_started_at ||
-      now.getTime() - link.failed_attempts_window_started_at.getTime() > PASSWORD_ATTEMPT_WINDOW_MS;
-
-    const attemptsBefore = windowExpired ? 0 : link.failed_password_attempts;
-    if (attemptsBefore >= MAX_PASSWORD_ATTEMPTS) throw tooManyPasswordAttempts();
-
-    const passwordOk = password ? await verifyPassword(password, link.password_hash) : false;
-
-    if (!passwordOk) {
-      await db.share_links.update({
-        where: { id: link.id },
-        data: {
-          failed_password_attempts: attemptsBefore + 1,
-          failed_attempts_window_started_at: windowExpired ? now : link.failed_attempts_window_started_at,
-        },
-      });
-      throw invalidSharePassword();
-    }
-
-    if (attemptsBefore > 0 || windowExpired) {
-      await db.share_links.update({
-        where: { id: link.id },
-        data: { failed_password_attempts: 0, failed_attempts_window_started_at: null },
-      });
-    }
+    if (!grant || grant.linkId !== link.id || grant.expiresAt <= Date.now()) throw sharePasswordRequired();
   }
-
   return link;
 }
 
@@ -174,8 +180,8 @@ async function isWithinSharedScope(link: ResolvedShareLink, itemType: ItemType, 
  * `isRoot`/`parentFolderId` let the frontend know when to stop offering an "up" link — a visitor
  * can browse down into the shared subtree but never up past its root.
  */
-export async function getPublicFolderContents(token: string, password: string | undefined, folderId?: string) {
-  const link = await resolveShareLink(token, password);
+export async function getPublicFolderContents(token: string, grant: UnlockGrant | null, folderId?: string) {
+  const link = await resolveShareLink(token, grant);
 
   if (link.item_type === "file") {
     const file = await db.files.findFirst({ where: { id: link.item_id, deleted_at: null } });
@@ -235,8 +241,8 @@ function serializePublicItems(
   ];
 }
 
-export async function getPublicDownloadUrl(token: string, password: string | undefined, fileId: string): Promise<string> {
-  const link = await resolveShareLink(token, password);
+export async function getPublicDownloadUrl(token: string, grant: UnlockGrant | null, fileId: string): Promise<string> {
+  const link = await resolveShareLink(token, grant);
   if (!(await isWithinSharedScope(link, "file", fileId))) throw shareLinkNotFound();
 
   const file = await db.files.findFirst({ where: { id: fileId, deleted_at: null } });
@@ -247,10 +253,10 @@ export async function getPublicDownloadUrl(token: string, password: string | und
 
 export async function getPublicPreviewUrl(
   token: string,
-  password: string | undefined,
+  grant: UnlockGrant | null,
   fileId: string,
 ): Promise<{ url: string; mimeType: string } | null> {
-  const link = await resolveShareLink(token, password);
+  const link = await resolveShareLink(token, grant);
   if (!(await isWithinSharedScope(link, "file", fileId))) throw shareLinkNotFound();
 
   const file = await db.files.findFirst({ where: { id: fileId, deleted_at: null } });
@@ -263,10 +269,10 @@ export async function getPublicPreviewUrl(
 
 export async function getPublicThumbnailUrl(
   token: string,
-  password: string | undefined,
+  grant: UnlockGrant | null,
   fileId: string,
 ): Promise<string | null> {
-  const link = await resolveShareLink(token, password);
+  const link = await resolveShareLink(token, grant);
   if (!(await isWithinSharedScope(link, "file", fileId))) throw shareLinkNotFound();
 
   const file = await db.files.findFirst({ where: { id: fileId, deleted_at: null } });
@@ -275,8 +281,8 @@ export async function getPublicThumbnailUrl(
   return storage.getPresignedDownloadUrl(file.thumbnail_key);
 }
 
-export async function getPublicFolderZipArchive(token: string, password: string | undefined, folderId: string) {
-  const link = await resolveShareLink(token, password);
+export async function getPublicFolderZipArchive(token: string, grant: UnlockGrant | null, folderId: string) {
+  const link = await resolveShareLink(token, grant);
   if (!(await isWithinSharedScope(link, "folder", folderId))) throw shareLinkNotFound();
 
   const folder = await db.folders.findFirst({ where: { id: folderId, deleted_at: null } });

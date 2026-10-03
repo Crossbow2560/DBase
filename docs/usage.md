@@ -35,7 +35,7 @@ This guide assumes the stack is running and an admin has been bootstrapped (see 
 
 Open **Share** on any item. You need editor access or higher on the item to share it.
 
-- **With a user:** enter their email (it must be a registered account) and pick `viewer` or `editor`. Sharing a folder shares everything inside it, including items added later. The recipient sees the item under **Shared with me**.
+- **With a user:** enter their email (it must be a registered account) and pick `viewer` or `editor`. Sharing a folder shares everything inside it, including items added later. The recipient sees the item under **Shared with me**, which lists top-level shares only; what's inside a shared folder is reached by opening it (or through search).
 - **With a link:** create a link with a role, an optional password and an optional expiry. Anyone with the URL `/s/<token>` can open it without an account. Folder links can be browsed and downloaded as a zip.
 - **Revoking:** remove a collaborator or revoke a link from the same dialog. Only a link's creator can revoke it.
 - **Transfer ownership:** the current owner can make another user the owner of an item.
@@ -53,7 +53,7 @@ What viewers and editors can do:
 
 - **Favorites** (`/favorites`): star items for quick access.
 - **Tags** (`/tags`): create personal colored tags, apply them from an item's menu and browse by tag. Tags are private to you.
-- **Search** (`/search`): partial, case-insensitive name search across your own items and items shared **directly** with you. Items you can only reach through a shared parent folder won't show up; open the folder instead.
+- **Search** (`/search`): partial, case-insensitive name search across everything you can open: your own items, items shared with you, and anything inside a folder shared with you. Results are capped at 50.
 
 ## Trash
 
@@ -94,6 +94,6 @@ Things to know:
 | Login says "Please verify your email" | Account not verified | Use the link from the email or backend log, or resend it |
 | Thumbnails or downloads fail to load for remote users | `MINIO_PUBLIC_ENDPOINT` still `localhost` | Set it to the host MinIO is reachable at from browsers |
 | Verification and reset links point to localhost | `PUBLIC_APP_URL` not set | Set it to the frontend's public URL |
-| Login "works" but you're immediately logged out on a remote host | Session cookie is `secure` and you're on plain HTTP | Serve the frontend over HTTPS |
+| Login "works" but you're immediately logged out on a remote host | `COOKIE_SECURE=true` (or an `https://` `PUBLIC_APP_URL`) while browsing over plain HTTP | Serve the frontend over HTTPS, or make `PUBLIC_APP_URL` match how users actually reach it |
 | Bulk upload slows to a trickle | Write rate limit (60/min) | Expected; the client retries automatically after `Retry-After` |
 | `NO_SYSTEM_ADMIN` when deleting an account | No other active admin to inherit items | Promote another admin first |

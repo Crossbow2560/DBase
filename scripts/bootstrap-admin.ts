@@ -3,8 +3,14 @@
 // no admin could ever be created" — implemented here as an operator-run CLI script rather than
 // an HTTP endpoint, so there is no permanently-present "create an admin" attack surface).
 //
-// Usage:
-//   npm run bootstrap:admin -- --email=admin@example.com --password=changeme123 --name="System Admin"
+// Usage (interactive — the password is prompted for, hidden, and confirmed):
+//   npm run bootstrap:admin -- --email=admin@example.com --name="System Admin"
+//   docker compose exec -it backend npm run bootstrap:admin -- --email=admin@example.com
+// Non-interactive (CI, provisioning): pass the password through the environment instead:
+//   BOOTSTRAP_ADMIN_PASSWORD=... npm run bootstrap:admin -- --email=admin@example.com
+//
+// The password is deliberately NOT accepted as a command-line flag: argv is visible to every user
+// on the machine (`ps`) and lands in shell history.
 
 import "dotenv/config";
 import { db } from "../src/db.js";
@@ -20,16 +26,73 @@ function parseArgs() {
   return args;
 }
 
+/** Reads a line from the terminal without echoing it. */
+function promptHidden(question: string): Promise<string> {
+  const stdin = process.stdin;
+  if (!stdin.isTTY) {
+    return Promise.reject(
+      new Error("No terminal to prompt on — set BOOTSTRAP_ADMIN_PASSWORD, or run with a TTY (docker compose exec -it ...)."),
+    );
+  }
+  process.stdout.write(question);
+  return new Promise((resolve, reject) => {
+    let value = "";
+    const cleanup = () => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.off("data", onData);
+      process.stdout.write("\n");
+    };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === "\r" || ch === "\n") {
+          cleanup();
+          resolve(value);
+          return;
+        }
+        if (ch === "\u0003") {
+          cleanup();
+          reject(new Error("Cancelled."));
+          return;
+        }
+        if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
+        else value += ch;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.setEncoding("utf8");
+    stdin.resume();
+    stdin.on("data", onData);
+  });
+}
+
+async function readPassword(): Promise<string> {
+  const fromEnv = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+  if (fromEnv) return fromEnv;
+  const first = await promptHidden("Admin password: ");
+  const second = await promptHidden("Confirm password: ");
+  if (first !== second) throw new Error("Passwords don't match.");
+  return first;
+}
+
 async function main() {
   const args = parseArgs();
   const email = args.get("email");
-  const password = args.get("password");
   const name = args.get("name") ?? "System Admin";
 
-  if (!email || !password) {
-    console.error('Usage: npm run bootstrap:admin -- --email=... --password=... [--name="..."]');
+  if (args.has("password")) {
+    console.error(
+      "--password is no longer accepted (it would be visible in `ps` and shell history). " +
+        "Omit it to be prompted, or set BOOTSTRAP_ADMIN_PASSWORD.",
+    );
     process.exit(1);
   }
+  if (!email) {
+    console.error('Usage: npm run bootstrap:admin -- --email=... [--name="..."]  (password is prompted for)');
+    process.exit(1);
+  }
+
+  const password = await readPassword();
 
   if (!isPasswordStrongEnough(password)) {
     console.error("Password must be at least 8 characters.");
@@ -80,7 +143,7 @@ main()
       );
       process.exit(1);
     }
-    console.error(err);
+    console.error(err instanceof Error ? err.message : err);
     process.exit(1);
   })
   .finally(() => db.$disconnect());

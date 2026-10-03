@@ -51,6 +51,12 @@ export function generateThumbnailKey(): string {
   return `thumbnails/${randomBytes(32).toString("hex")}`;
 }
 
+// MinIO's composeObject (completeMultipartUpload below) rejects any source except the last that's
+// smaller than 5 MiB — the same floor as S3 multipart. uploadPart enforces it up front so a too-small
+// part fails immediately with a clear error instead of at completion. web/lib/uploads.tsx's
+// CHUNK_SIZE_BYTES is exactly this value.
+export const MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
+
 function tempPartKey(uploadSessionId: string, partNumber: number): string {
   return `tmp/${uploadSessionId}/part-${String(partNumber).padStart(6, "0")}`;
 }

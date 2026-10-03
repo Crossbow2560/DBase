@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { randomBytes } from "node:crypto";
+import { parseTrustProxy, resolveCookieSecure } from "./lib/env.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -23,6 +25,11 @@ function parseEndpoint(value: string): { host: string; sslFromScheme?: boolean }
 
 export const config = {
   port: Number(process.env.PORT ?? 3000),
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
+  // Ceiling on requests per client IP per minute, across ALL routes and independent of any session
+  // cookie — so rotating made-up cookie values (each of which gets its own per-session bucket) can't
+  // escape rate limiting.
+  rateLimitPerIpPerMinute: Number(process.env.RATE_LIMIT_PER_IP_PER_MINUTE ?? 1200),
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? "dbase_session",
   sessionTtlDays: Number(process.env.SESSION_TTL_DAYS ?? 30),
   defaultUserQuotaBytes: BigInt(process.env.DEFAULT_USER_QUOTA_BYTES ?? "16106127360"), // 15 GiB
@@ -30,12 +37,20 @@ export const config = {
   emailVerificationTtlHours: Number(process.env.EMAIL_VERIFICATION_TTL_HOURS ?? 24),
   databaseUrl: requireEnv("DATABASE_URL"),
 
+  // Signs the share-link unlock cookie (access/routes.ts). Optional: if unset, a random per-process
+  // secret is used, which only means visitors re-enter a link's password after a backend restart.
+  cookieSecret: process.env.COOKIE_SECRET || randomBytes(32).toString("hex"),
+  cookieSecretIsEphemeral: !process.env.COOKIE_SECRET,
+
   // The frontend's own public origin — needed to build a real clickable link in an email (both
   // verification and password reset), as opposed to a bare token. Defaults to this compose
   // topology's local dev address; must be set to the real public domain for any other deployment
   // (same "things that need to change for a non-localhost deployment" category as
   // MINIO_PUBLIC_ENDPOINT — see .env's comment on that one).
   publicAppUrl: (process.env.PUBLIC_APP_URL ?? "http://localhost:3001").replace(/\/$/, ""),
+
+  // Secure attribute on the session and share-unlock cookies (lib/env.ts resolveCookieSecure).
+  cookieSecure: resolveCookieSecure(process.env.COOKIE_SECURE, process.env.PUBLIC_APP_URL ?? "http://localhost:3001"),
 
   email: {
     // Left unset in dev by default — sendEmail() (lib/email.ts) falls back to logging the

@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { db } from "../../db.js";
 import { checkPermission, resolveEffectiveRole, type ItemType, type Role } from "./permission-check.js";
 import { insufficientPermission, itemNotFound } from "./errors.js";
@@ -11,8 +12,13 @@ const ROLE_RANK: Record<Role, number> = { viewer: 1, editor: 2, owner: 3 };
  * by folder-service.ts/upload-service.ts right after the item row itself is created — not
  * exposed as its own route, since it's not something a client ever calls directly.
  */
-export async function createOwnerPermission(itemType: ItemType, itemId: string, ownerId: string): Promise<void> {
-  await db.permissions.create({
+export async function createOwnerPermission(
+  itemType: ItemType,
+  itemId: string,
+  ownerId: string,
+  client: Prisma.TransactionClient = db,
+): Promise<void> {
+  await client.permissions.create({
     data: { item_type: itemType, item_id: itemId, user_id: ownerId, role: "owner", granted_by: ownerId },
   });
 }
@@ -95,20 +101,29 @@ export async function revokePermission(
 }
 
 /**
- * REQUIREMENTS.md §5.5: every item directly shared with this user, distinct from their own
- * owned items. Deliberately direct grants only for this pass — items only reachable via an
- * ancestor folder share (not a direct grant on the item itself) are NOT included here yet, a
- * real, flagged gap: REQUIREMENTS.md's full definition also includes "access via a shared
- * folder," which needs a reverse walk (every folder this user has a direct grant on, then every
- * file/folder inside those subtrees) this function doesn't do. checkPermission()'s own
- * ancestor-walk logic is unaffected by this — a user can still access an item they only have
- * folder-inherited permission on, it just won't show up in this specific listing yet.
+ * REQUIREMENTS.md §5.5: the items shared with this user — the top-level shares only, by design
+ * (the same model as Google Drive's "Shared with me"): a shared folder appears once, and what's
+ * inside it is reached by opening it, where folder-inherited access applies (checkPermission).
+ * Everything inside shared folders is still findable through search (search-service.ts).
+ *
+ * Grants whose granter is deactivated are left out, matching checkPermission(): listing an item
+ * the user can't actually open would just lead to a "not found".
  */
 export async function listSharedWithMe(userId: string) {
-  const grants = await db.permissions.findMany({
+  const allGrants = await db.permissions.findMany({
     where: { user_id: userId, role: { not: "owner" } },
     orderBy: { created_at: "desc" },
   });
+  // granted_by is deliberately not a FK (0003), so there's no relation to filter through.
+  const activeGranters = new Set(
+    (
+      await db.users.findMany({
+        where: { id: { in: [...new Set(allGrants.map((g) => g.granted_by))] }, is_active: true },
+        select: { id: true },
+      })
+    ).map((u) => u.id),
+  );
+  const grants = allGrants.filter((g) => activeGranters.has(g.granted_by));
 
   const items: { id: string; type: ItemType; name: string; role: Role }[] = [];
   for (const grant of grants) {

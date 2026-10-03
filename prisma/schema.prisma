@@ -232,7 +232,7 @@ model share_links {
   id                                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   item_type                          item_type
   item_id                            String          @db.Uuid
-  token                              String          @unique
+  token_hash                         String          @unique
   role                               share_link_role
   password_hash                      String?
   failed_password_attempts           Int             @default(0)

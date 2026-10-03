@@ -30,12 +30,13 @@ Postgres is external (Supabase). The stack does not run its own database.
 
 ## Backend components
 
-`src/server.ts` builds one Fastify instance and does the following:
+`src/app.ts#buildApp()` builds the Fastify instance; `src/server.ts` calls it, starts listening and starts the three workers. The integration tests use `buildApp()` directly with `app.inject()`. `buildApp()`:
 
-1. Registers the cookie and rate-limit plugins. The rate limit is global (300 req/min), keyed by a SHA-256 of the session cookie, falling back to the client IP.
-2. Adds a raw `application/octet-stream` body parser for upload parts, with `bodyLimit` raised to 10 MB.
-3. Installs a single error handler that maps `AppError` → `{ error: { code, message } }`, schema-validation errors → `400 VALIDATION_ERROR`, and anything else → `500 INTERNAL_ERROR`.
-4. Registers each module's route plugin, then starts the three workers.
+1. Configures logging with a request serializer that masks share-link tokens and drops query strings, and sets `trustProxy` (`TRUST_PROXY`, default: loopback/private hops) so `request.ip` is the real client behind the Next.js proxy.
+2. Registers the cookie plugin (with `COOKIE_SECRET` for signed share-unlock cookies) and the rate-limit plugin: 300 req/min keyed by a SHA-256 of the session cookie (or IP), per-route overrides, plus a per-IP ceiling (`RATE_LIMIT_PER_IP_PER_MINUTE`) built on `createRateLimit()` so made-up cookies can't dodge limits.
+3. Adds a raw `application/octet-stream` body parser for upload parts, with `bodyLimit` raised to 10 MB.
+4. Installs a single error handler that maps `AppError` → `{ error: { code, message } }`, schema-validation errors → `400 VALIDATION_ERROR`, and anything else → `500 INTERNAL_ERROR`.
+5. Registers each module's route plugin. Route guards (`requireSession`, `requireAdmin`) and the shared rate-limit presets live in `modules/accounts/guards.ts`.
 
 ### Domain modules (`src/modules/*`)
 
@@ -46,7 +47,7 @@ Postgres is external (Supabase). The stack does not run its own database.
 | `access` | `checkPermission()` / `resolveEffectiveRole()`, permission grants, ownership transfer, share links (authenticated and public) |
 | `trash` | Trash listing, restore, "delete forever", deletion-queue processing |
 | `organize` | Favorites and per-user colored tags |
-| `search` | Case-insensitive name search over owned and directly-shared items |
+| `search` | Case-insensitive name search over everything the user can open (owned, shared, or inside a shared folder) |
 | `thumbnails` | Thumbnail queue and generation (`sharp`, `ffmpeg`, `pdftoppm`) |
 | `lifecycle` | Account deactivate, reactivate and delete (with ownership reassignment) |
 | `admin` | User management, quotas, roles, system storage limit, stats, activity log, failed jobs, MinIO backup/restore, outbound email |
@@ -57,7 +58,7 @@ Each module follows the same layout: `routes.ts` (HTTP and schema validation), `
 
 ### Two enforced boundaries
 
-- **Authorization:** every module calls `access/permission-check.ts#checkPermission(userId, itemType, itemId, requiredRole)`. It resolves the highest role from a direct grant or from any ancestor folder (it walks `folders.materialized_path`). Grants whose `granted_by` user is deactivated are ignored. Admins short-circuit to `true`. When access is denied, the route returns a 404-style `*_NOT_FOUND` rather than 403, so the item's existence isn't leaked.
+- **Authorization:** every module calls `access/permission-check.ts#checkPermission(userId, itemType, itemId, requiredRole)`. It resolves the highest role from a direct grant or from any ancestor folder in one SQL query (ancestors come from the parent's `folders.materialized_path`). Grants whose `granted_by` user is deactivated are ignored. Admins short-circuit to `true`. When access is denied, the route returns a 404-style `*_NOT_FOUND` rather than 403, so the item's existence isn't leaked.
 - **Storage:** only `storage/client.ts` builds MinIO clients or touches `storage_key`/`thumbnail_key`. It uses two clients: an internal one (`MINIO_ENDPOINT`, for I/O) and a public one (`MINIO_PUBLIC_ENDPOINT`, only for signing presigned URLs the browser will load). The region is pinned to `us-east-1` so presigning never makes a network call.
 
 ### Background workers (`src/workers/*`)
@@ -77,22 +78,28 @@ All workers use `setInterval` with an in-memory "tick in progress" flag so ticks
 
 1. `POST /auth/register` creates the user with `email_verified=false` and emails a verification link (`PUBLIC_APP_URL/verify-email?token=…`). Only the SHA-256 hash of the token is stored.
 2. `POST /auth/verify-email` flips `email_verified`. A DB trigger (migration `0022`) allocates the user's quota out of the system storage limit at this point.
-3. `POST /auth/login` checks the bcrypt hash, then `is_active`, then `email_verified`, in that order, so a wrong password looks identical either way. It creates a `sessions` row and sets the `dbase_session` httpOnly, `secure`, `SameSite=Lax` cookie.
+3. `POST /auth/login` checks the bcrypt hash, then `is_active`, then `email_verified`, in that order, so a wrong password looks identical either way. It creates a `sessions` row and sets the `dbase_session` httpOnly, `SameSite=Lax` cookie (`Secure` when `PUBLIC_APP_URL` is https, or per `COOKIE_SECURE`).
 4. Every protected route runs `requireSession` as a `preHandler`. It hashes the cookie, loads the session and its user, and rejects the request if the session is revoked or expired or the user is deactivated.
 
 ### Chunked upload
 
 ```
 POST /files                                  → upload_sessions row (pending, expires in 60 min)
-PUT  /files/upload-sessions/:id/parts/:n     → atomic quota credit, then MinIO tmp/<id>/part-NNNNNN
-POST /files/upload-sessions/:id/complete     → files row, MinIO composeObject → files/<random>,
-                                               owner permission, thumbnail enqueue, audit log
+PUT  /files/upload-sessions/:id/parts/:n     → [tx, session row locked] part row + quota charge,
+                                               then MinIO tmp/<id>/part-NNNNNN   (n = 0 … totalParts-1)
+POST /files/upload-sessions/:id/complete     → claim session (pending → complete),
+                                               MinIO composeObject → files/<random>,
+                                               [tx] files row + owner permission + session link,
+                                               thumbnail enqueue, audit log
 ```
 
 - The client (`web/lib/uploads.tsx`) sends 5 MB chunks, runs at most 3 uploads concurrently and retries on 429 using `Retry-After`.
 - Quota is charged per part with a single conditional `UPDATE users … WHERE used + delta <= quota RETURNING`, so concurrent parts can't overshoot. A system-wide trigger raises `SYSTEM_STORAGE_LIMIT_EXCEEDED` on top of that.
-- Parts are idempotent: re-sending a part that was already recorded is a no-op.
-- The destination folder and name are re-validated on every part and on completion.
+- Part numbers must be `0 … totalParts-1`, and every part except the last must be at least 5 MiB (MinIO's compose minimum).
+- Parts are idempotent: re-sending a recorded part is a no-op. Recording the part and charging quota happen in one transaction holding the session row's lock, so concurrent retries charge once and an abort always sees (and refunds) every charged part.
+- Completion composes the object **before** creating the file row. A compose failure returns the session to `pending` (the client can retry or cancel); a DB failure deletes the composed object and aborts with a refund. Cancel, the cleanup worker and a failing completion each claim the session with a conditional update, so only one of them ever refunds.
+- On page load the frontend cancels any upload interrupted by a refresh of that tab (ids kept in `sessionStorage`), releasing its quota immediately.
+- The destination folder and name are re-validated on every part and on completion. Sibling names are unique per folder regardless of who owns each item (`0023`).
 
 ### Downloads and previews
 
@@ -101,7 +108,8 @@ The backend never streams single files. `GET /files/:id/download|preview|thumbna
 ### Sharing
 
 - **Direct grants:** these are rows in `permissions` (`owner`/`editor`/`viewer`). Folder grants apply to the whole subtree dynamically.
-- **Share links:** these store a random token, a role, an optional bcrypt password and an optional expiry. Public routes under `/api/v1/public/share-links/:token` need no session. They resolve the link, check that its creator is still active, rate-limit password attempts (10 per 15 min) and keep folder browsing confined to the shared subtree.
+- **Share links:** these store the SHA-256 of a random token (the raw token is shown to the creator once), a role, an optional bcrypt password and an optional expiry. Public routes under `/api/v1/public/share-links/:token` need no session. They resolve the link, check that its creator is still active, and keep folder browsing confined to the shared subtree.
+- **Link passwords:** `POST …/:token/unlock` checks the password once (limited per client IP and link) and sets a signed, httpOnly cookie scoped to that link's API path; the other public routes require it. Passwords never appear in URLs or logs.
 
 ### Trash and deletion
 

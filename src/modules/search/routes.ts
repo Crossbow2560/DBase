@@ -1,19 +1,8 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
-import { config } from "../../config.js";
-import { AppError } from "../accounts/errors.js";
-import { resolveSession } from "../accounts/service.js";
+import type { FastifyInstance } from "fastify";
 import { search } from "./search-service.js";
+import { requireSession } from "../accounts/guards.js";
 
-async function requireSession(request: FastifyRequest) {
-  const rawToken = request.cookies[config.sessionCookieName];
-  if (!rawToken) throw new AppError(401, "UNAUTHENTICATED", "Login required.");
-  const session = await resolveSession(rawToken);
-  if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
-  request.session = session;
-}
-
-// Subcomponent 8 — the frontend's search page (web/app/(app)/search/page.tsx) has called this
-// exact route since it was scaffolded; nothing on the backend ever answered it until now.
+// Subcomponent 8 — backs the frontend's search page (web/app/(app)/search/page.tsx).
 export async function searchRoutes(app: FastifyInstance) {
   app.get("/api/v1/search", { preHandler: requireSession }, async (request, reply) => {
     const { q } = request.query as { q?: string };

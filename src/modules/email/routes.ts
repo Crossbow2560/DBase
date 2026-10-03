@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { config } from "../../config.js";
 import { AppError } from "../accounts/errors.js";
+import { publicRateLimit } from "../accounts/guards.js";
 import { storeInboundEmail, verifySvixSignature } from "./inbound-service.js";
 
 /**
@@ -27,7 +28,7 @@ export async function emailRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post("/api/v1/email/inbound", async (request, reply) => {
+  app.post("/api/v1/email/inbound", { ...publicRateLimit }, async (request, reply) => {
     const secret = config.email.inboundWebhookSecret;
     if (!secret) {
       // Never accept unsigned inbound mail — without a configured secret there is no way to know

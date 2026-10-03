@@ -16,7 +16,7 @@
 import * as React from "react";
 import { use, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowUpDown, Download, Filter, Folder, FileText, List, LayoutGrid, SearchIcon, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
@@ -51,13 +51,14 @@ interface PublicPreviewResponse {
   mimeType?: string;
 }
 
-function PublicThumbnail({ token, password, fileId }: { token: string; password?: string; fileId: string }) {
+// A password-protected link's password is never sent with these requests: the unlock form posts it
+// once to /unlock, which sets an httpOnly cookie scoped to this link's API path that the browser
+// attaches automatically (fetches and plain <a>/window.open downloads alike).
+function PublicThumbnail({ token, fileId }: { token: string; fileId: string }) {
   const { data } = useQuery({
-    queryKey: ["public-share-link", token, "thumbnail", fileId, password],
+    queryKey: ["public-share-link", token, "thumbnail", fileId],
     queryFn: () =>
-      api.get<{ available: boolean; url?: string }>(
-        `/public/share-links/${token}/files/${fileId}/thumbnail${password ? `?password=${encodeURIComponent(password)}` : ""}`,
-      ),
+      api.get<{ available: boolean; url?: string }>(`/public/share-links/${token}/files/${fileId}/thumbnail`),
     staleTime: 60_000,
   });
 
@@ -69,23 +70,18 @@ function PublicThumbnail({ token, password, fileId }: { token: string; password?
 
 function PublicFilePreviewModal({
   token,
-  password,
   fileId,
   name,
   onClose,
 }: {
   token: string;
-  password?: string;
   fileId: string;
   name: string;
   onClose: () => void;
 }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["public-share-link", token, "preview", fileId, password],
-    queryFn: () =>
-      api.get<PublicPreviewResponse>(
-        `/public/share-links/${token}/files/${fileId}/preview${password ? `?password=${encodeURIComponent(password)}` : ""}`,
-      ),
+    queryKey: ["public-share-link", token, "preview", fileId],
+    queryFn: () => api.get<PublicPreviewResponse>(`/public/share-links/${token}/files/${fileId}/preview`),
   });
 
   React.useEffect(() => {
@@ -98,9 +94,7 @@ function PublicFilePreviewModal({
 
   async function download() {
     const tab = window.open("", "_blank");
-    const { url } = await api.get<{ url: string }>(
-      `/public/share-links/${token}/files/${fileId}/download${password ? `?password=${encodeURIComponent(password)}` : ""}`,
-    );
+    const { url } = await api.get<{ url: string }>(`/public/share-links/${token}/files/${fileId}/download`);
     if (tab) tab.location.href = url;
   }
 
@@ -165,8 +159,10 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
   const searchParams = useSearchParams();
   const folderId = searchParams.get("folder") ?? undefined;
 
+  const queryClient = useQueryClient();
   const [password, setPassword] = React.useState("");
-  const [submittedPassword, setSubmittedPassword] = React.useState<string | undefined>(undefined);
+  const [unlockError, setUnlockError] = React.useState<string | null>(null);
+  const [unlocking, setUnlocking] = React.useState(false);
   const [view, setView] = React.useState<"list" | "grid">("list");
   const [previewItem, setPreviewItem] = React.useState<SharedItem | null>(null);
   // Same client-side search/filter/sort as the authenticated folder browser (folder-browser.tsx)
@@ -181,15 +177,33 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
   >("name-asc");
 
   const { data, error, isLoading } = useQuery({
-    queryKey: ["public-share-link", token, submittedPassword, folderId],
+    queryKey: ["public-share-link", token, "contents", folderId],
     queryFn: () =>
       api.get<SharedFolderContents>(
-        `/public/share-links/${token}?${new URLSearchParams({
-          ...(submittedPassword ? { password: submittedPassword } : {}),
-          ...(folderId ? { folderId } : {}),
-        }).toString()}`,
+        `/public/share-links/${token}${folderId ? `?${new URLSearchParams({ folderId }).toString()}` : ""}`,
       ),
   });
+
+  async function unlock(e: React.FormEvent) {
+    e.preventDefault();
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      await api.post(`/public/share-links/${token}/unlock`, { password });
+      setPassword("");
+      await queryClient.invalidateQueries({ queryKey: ["public-share-link", token] });
+    } catch (err) {
+      setUnlockError(
+        err instanceof ApiError && err.code === "INVALID_PASSWORD"
+          ? "Incorrect password."
+          : err instanceof ApiError && err.code === "RATE_LIMITED"
+            ? "Too many attempts. Try again later."
+            : "Could not unlock this link.",
+      );
+    } finally {
+      setUnlocking(false);
+    }
+  }
 
   const needsPassword = error instanceof ApiError && error.status === 401;
 
@@ -242,15 +256,12 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
 
   async function downloadFile(item: SharedItem) {
     const tab = window.open("", "_blank");
-    const { url } = await api.get<{ url: string }>(
-      `/public/share-links/${token}/files/${item.id}/download${submittedPassword ? `?password=${encodeURIComponent(submittedPassword)}` : ""}`,
-    );
+    const { url } = await api.get<{ url: string }>(`/public/share-links/${token}/files/${item.id}/download`);
     if (tab) tab.location.href = url;
   }
 
   function downloadFolderZip(folderId: string) {
-    const qs = submittedPassword ? `?password=${encodeURIComponent(submittedPassword)}` : "";
-    window.open(`/api/v1/public/share-links/${token}/folders/${folderId}/download-zip${qs}`, "_blank");
+    window.open(`/api/v1/public/share-links/${token}/folders/${folderId}/download-zip`, "_blank");
   }
 
   function actionsFor(item: SharedItem): RowAction[] {
@@ -263,10 +274,7 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
     return (
       <div className="flex min-h-screen items-center justify-center px-4">
         <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            setSubmittedPassword(password);
-          }}
+          onSubmit={unlock}
           className="w-full max-w-sm space-y-4 rounded-lg border border-border p-6"
         >
           <h1 className="text-lg font-semibold">This link is password-protected</h1>
@@ -276,8 +284,9 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <Button type="submit" className="w-full">
-            Unlock
+          {unlockError && <p className="text-sm text-destructive">{unlockError}</p>}
+          <Button type="submit" className="w-full" disabled={unlocking || password.length === 0}>
+            {unlocking ? "Unlocking…" : "Unlock"}
           </Button>
         </form>
       </div>
@@ -474,7 +483,7 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
                   onClick={() => setPreviewItem(item)}
                   className="flex aspect-square items-center justify-center overflow-hidden rounded-t-lg bg-muted/40"
                 >
-                  <PublicThumbnail token={token} password={submittedPassword} fileId={item.id} />
+                  <PublicThumbnail token={token} fileId={item.id} />
                 </button>
               )}
 
@@ -489,7 +498,6 @@ function PublicShareLinkContent({ params }: { params: Promise<{ token: string }>
       {previewItem && (
         <PublicFilePreviewModal
           token={token}
-          password={submittedPassword}
           fileId={previewItem.id}
           name={previewItem.name}
           onClose={() => setPreviewItem(null)}

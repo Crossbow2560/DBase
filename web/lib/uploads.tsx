@@ -1,18 +1,14 @@
 "use client";
 
 // FRONTEND_DESIGN.md §8 item 2, resolved by owner decision: a bottom-right toast tray with
-// pause/resume/cancel per upload. Drives the real multipart upload endpoints APPLICATION_DESIGN.md
-// §4.3 documents (POST /files, PUT .../parts/:n, POST .../complete, DELETE upload-sessions/:id) —
-// none of which the backend has implemented yet (Subcomponent 1), so every upload attempted
-// against this scaffold will surface a real error from the 404, not a faked progress bar. That's
-// deliberate: this module is honest about what it can't do yet rather than simulating success.
+// pause/resume/cancel per upload. Drives the multipart upload endpoints (POST /files,
+// PUT .../parts/:n with 0-indexed parts, POST .../complete, DELETE upload-sessions/:id).
 //
-// The persisted-upload-session-id-in-localStorage note from §6.1 is implemented here: each
-// task's server-assigned uploadSessionId (once known) is written to localStorage keyed by a
-// client-generated task id, so a page refresh mid-upload can, in principle, rediscover it. The
-// actual "rediscover and offer to resume across a refresh" flow is not wired up yet — this
-// module persists the id but doesn't yet read it back on mount. Flagged, not silently assumed
-// done.
+// Interrupted uploads: a page refresh loses the browser's File objects, so an in-progress or
+// paused upload can't be resumed. Each task's server-side uploadSessionId is remembered in
+// sessionStorage (per tab — it survives a refresh but isn't shared with other tabs, which may
+// still be uploading), and on the next mount every remembered session is cancelled so its
+// already-charged bytes are released immediately rather than after the server's TTL cleanup.
 
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -89,6 +85,41 @@ interface InternalTaskState {
   pauseRequested: boolean;
 }
 
+// sessionStorage can throw (privacy modes, blocked storage) — losing the bookkeeping only means
+// the server's own TTL cleanup reclaims an interrupted session instead, so failures are ignored.
+function rememberSession(taskId: string, uploadSessionId: string) {
+  try {
+    window.sessionStorage.setItem(`${STORAGE_KEY_PREFIX}${taskId}`, uploadSessionId);
+  } catch {}
+}
+
+function forgetSession(taskId: string) {
+  try {
+    window.sessionStorage.removeItem(`${STORAGE_KEY_PREFIX}${taskId}`);
+  } catch {}
+}
+
+/** Removes and returns every session id a previous page load in this tab left behind. */
+function takeInterruptedSessions(): string[] {
+  const ids: string[] = [];
+  try {
+    const store = window.sessionStorage;
+    for (const key of Object.keys(store)) {
+      if (!key.startsWith(STORAGE_KEY_PREFIX)) continue;
+      const value = store.getItem(key);
+      store.removeItem(key);
+      if (value) ids.push(value);
+    }
+  } catch {}
+  // Earlier versions kept these in localStorage and never read them back — drop the leftovers.
+  try {
+    for (const key of Object.keys(window.localStorage)) {
+      if (key.startsWith(STORAGE_KEY_PREFIX)) window.localStorage.removeItem(key);
+    }
+  } catch {}
+  return ids;
+}
+
 async function abortSessionOnServer(uploadSessionId: string) {
   await fetch(`/api/v1/files/upload-sessions/${uploadSessionId}`, {
     method: "DELETE",
@@ -103,6 +134,17 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const queueRef = React.useRef<string[]>([]);
   const activeCountRef = React.useRef(0);
   const queryClient = useQueryClient();
+
+  // Release uploads interrupted by a refresh of this tab (see the header comment). Ids are
+  // removed synchronously before any request, so StrictMode's double-invoked effect can't cancel
+  // the same session twice.
+  React.useEffect(() => {
+    const interrupted = takeInterruptedSessions();
+    if (interrupted.length === 0) return;
+    void Promise.all(interrupted.map(abortSessionOnServer)).then(() =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() }),
+    );
+  }, [queryClient]);
 
   function updateTask(id: string, patch: Partial<UploadTask>) {
     setUploads((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -143,7 +185,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }
         const { uploadSessionId } = (await res.json()) as { uploadSessionId: string };
         internal.uploadSessionId = uploadSessionId;
-        window.localStorage.setItem(`${STORAGE_KEY_PREFIX}${id}`, uploadSessionId);
+        rememberSession(id, uploadSessionId);
       }
 
       while (internal.nextPartNumber * CHUNK_SIZE_BYTES < internal.file.size || internal.nextPartNumber === 0) {
@@ -201,7 +243,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         throw new ApiError(completeRes.status, body?.error?.code ?? "INTERNAL_ERROR", body?.error?.message ?? "Could not finalize upload.");
       }
 
-      window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);
+      forgetSession(id);
       updateTask(id, { status: "complete", uploadedBytes: internal.file.size });
       queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
       // Was missing entirely — completion only ever refreshed the quota indicator, never the
@@ -217,7 +259,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       // the user in the meantime. Abort immediately instead, same as an explicit cancel.
       if (internal.uploadSessionId) {
         await abortSessionOnServer(internal.uploadSessionId);
-        window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);
+        forgetSession(id);
         queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
       }
       updateTask(id, {
@@ -283,7 +325,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       queryClient.invalidateQueries({ queryKey: queryKeys.storageUsage() });
     }
     if (internal) internal.pauseRequested = true;
-    window.localStorage.removeItem(`${STORAGE_KEY_PREFIX}${id}`);
+    forgetSession(id);
     updateTask(id, { status: "canceled" });
   }
 

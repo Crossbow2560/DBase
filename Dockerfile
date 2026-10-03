@@ -34,6 +34,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/scripts ./scripts
+# scripts/bootstrap-admin.ts runs under tsx and imports the app's TypeScript sources (../src/db.js,
+# ../src/lib/password.js, ../src/config.js) — without these, the documented
+# `docker compose exec -it backend npm run bootstrap:admin` failed with ERR_MODULE_NOT_FOUND
+# (found by running it against a freshly built image, not just building the image).
+COPY --from=build /app/src ./src
 # scripts/migrate.ts (npm run migrate) reads these directly at runtime — without this the
 # runtime image has no supabase/ directory at all, and `docker compose run --rm backend npm run
 # migrate` fails with ENOENT scanning /app/supabase/migrations (real bug, found by actually

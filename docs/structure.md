@@ -13,9 +13,10 @@
 │   ├── migrate.ts                 # applies supabase/migrations/*.sql, tracks them in _migrations
 │   └── bootstrap-admin.ts         # creates the first admin (refuses if one exists)
 ├── supabase/
-│   └── migrations/                # 0001_foundation.sql … 0022_preallocate_user_quotas.sql
+│   └── migrations/                # 0001_foundation.sql … 0024_hash_share_link_tokens.sql
 ├── src/
-│   ├── server.ts                  # Fastify bootstrap, global rate limit, error handler, workers
+│   ├── app.ts                     # buildApp(): plugins, rate limits, error handler, routes
+│   ├── server.ts                  # listen + start workers
 │   ├── config.ts                  # env parsing (dotenv), MinIO internal vs public endpoints
 │   ├── db.ts                      # the single shared PrismaClient
 │   ├── types/fastify.d.ts         # request.session / rawSessionToken / rawBody augmentation
@@ -23,9 +24,10 @@
 │   │   ├── password.ts (+ .test)  # bcrypt (12 rounds), 8-char minimum
 │   │   ├── tokens.ts (+ .test)    # 32-byte base64url tokens, SHA-256 hashing
 │   │   ├── email.ts               # Resend send, falls back to console logging
-│   │   └── emailTemplate.ts       # HTML email layout
+│   │   ├── emailTemplate.ts       # HTML email layout
+│   │   └── env.ts (+ .test)       # pure parsers: TRUST_PROXY, COOKIE_SECURE
 │   ├── modules/
-│   │   ├── accounts/              # auth, sessions, profile, storage usage
+│   │   ├── accounts/              # auth, sessions, profile, storage usage; guards.ts (route preconditions)
 │   │   ├── filesystem/            # folders, files, uploads, name normalization
 │   │   ├── access/                # permission-check, grants, ownership transfer, share links
 │   │   ├── trash/                 # trash listing, restore, deletion queue
@@ -40,6 +42,9 @@
 │       ├── upload-session-cleanup.ts
 │       ├── deletion-queue.ts
 │       └── thumbnail-queue.ts
+├── test/
+│   ├── integration/               # node:test suites against real Postgres + MinIO (harness.ts)
+│   └── preview/                   # seed + runner for a throwaway local environment
 ├── web/                           # Next.js frontend (separate npm project)
 │   ├── Dockerfile                 # standalone build; BACKEND_URL is a build arg
 │   ├── next.config.js             # /api/v1/* rewrite to the backend, loads root .env
@@ -76,7 +81,7 @@ What should **not** go where:
 - **Permissions:** modules don't query `permissions` directly to make access decisions; they call `access/permission-check.ts`.
 - **MinIO:** nothing outside `storage/client.ts` imports `minio` or builds object keys.
 - **Workers:** the files in `workers/` don't contain business logic, only scheduling and overlap guards.
-- **`requireSession`:** this guard is currently duplicated in each `routes.ts`. Keep the copies identical until it's factored into a shared module.
+- **Route guards:** don't redefine `requireSession`/`requireAdmin` or rate-limit presets in a module; import them from `modules/accounts/guards.ts`.
 
 ### Database (`supabase/migrations/`)
 

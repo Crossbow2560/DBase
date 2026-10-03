@@ -1,30 +1,7 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
-import { config } from "../../config.js";
-import { AppError } from "../accounts/errors.js";
-import { resolveSession } from "../accounts/service.js";
-import type { ItemType } from "../access/permission-check.js";
+import type { FastifyInstance } from "fastify";
 import * as favorites from "./favorite-service.js";
 import * as tags from "./tag-service.js";
-
-// Same duplicated-requireSession pattern as every other module's routes.ts.
-async function requireSession(request: FastifyRequest) {
-  const rawToken = request.cookies[config.sessionCookieName];
-  if (!rawToken) throw new AppError(401, "UNAUTHENTICATED", "Login required.");
-  const session = await resolveSession(rawToken);
-  if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
-  request.session = session;
-}
-
-function parseItemType(raw: string): ItemType {
-  if (raw !== "file" && raw !== "folder") {
-    throw new AppError(400, "VALIDATION_ERROR", "type must be 'file' or 'folder'.");
-  }
-  return raw;
-}
-
-const writeHeavyRateLimit = {
-  config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
-} as const;
+import { requireSession, parseItemType, writeHeavyRateLimit } from "../accounts/guards.js";
 
 export async function organizeRoutes(app: FastifyInstance) {
   app.get("/api/v1/favorites", { preHandler: requireSession }, async (request, reply) => {

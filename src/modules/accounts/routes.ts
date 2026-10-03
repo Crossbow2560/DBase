@@ -1,48 +1,20 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { config } from "../../config.js";
-import { AppError } from "./errors.js";
+import { requireSession, unauthenticatedRateLimit } from "./guards.js";
 import * as accounts from "./service.js";
 import * as lifecycle from "../lifecycle/lifecycle-service.js";
 
 const emailSchema = { type: "string", format: "email" } as const;
 const passwordSchema = { type: "string", minLength: 8 } as const;
 
-// APPLICATION_DESIGN.md §4.7's table: register/login/password-reset-request are the
-// unauthenticated endpoint class — 20 req/15min, keyed on source IP specifically (not the
-// server's default cookie-or-ip keying from server.ts, since there's no session cookie to key
-// on yet at this point in the flow anyway — an unauthenticated request never has one).
-const unauthenticatedRateLimit = {
-  config: {
-    rateLimit: {
-      max: 20,
-      timeWindow: "15 minutes",
-      keyGenerator: (request: FastifyRequest) => `ip:${request.ip}`,
-    },
-  },
-} as const;
-
 function setSessionCookie(reply: import("fastify").FastifyReply, rawToken: string, expiresAt: Date) {
   reply.setCookie(config.sessionCookieName, rawToken, {
     httpOnly: true,
-    secure: true,
+    secure: config.cookieSecure,
     sameSite: "lax",
     path: "/",
     expires: expiresAt,
   });
-}
-
-/** Resolves the current session from the cookie, or throws 401. Attach as a preHandler. */
-async function requireSession(request: FastifyRequest) {
-  const rawToken = request.cookies[config.sessionCookieName];
-  if (!rawToken) {
-    throw new AppError(401, "UNAUTHENTICATED", "Login required.");
-  }
-  const session = await accounts.resolveSession(rawToken);
-  if (!session) {
-    throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
-  }
-  request.session = session;
-  request.rawSessionToken = rawToken;
 }
 
 export async function accountRoutes(app: FastifyInstance) {
@@ -110,10 +82,17 @@ export async function accountRoutes(app: FastifyInstance) {
     reply.send(breakdown);
   });
 
-  // Backs the share dialog's "share with" input — resolves an email to a userId.
+  // Backs the share dialog's "share with" input — resolves an email to a userId. Telling a sharer
+  // whether an address has an account is inherent to sharing, but it also makes this an account-
+  // enumeration oracle for any logged-in user, so it gets a much tighter bound than the general
+  // 300/min: plenty for typing collaborators' addresses, useless for sweeping a list of emails.
   app.get(
     "/api/v1/users/lookup",
-    { preHandler: requireSession, schema: { querystring: { type: "object", properties: { email: emailSchema } } } },
+    {
+      preHandler: requireSession,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+      schema: { querystring: { type: "object", properties: { email: emailSchema } } },
+    },
     async (request, reply) => {
       const { email } = request.query as { email: string };
       const user = await accounts.lookupUserByEmail(email);

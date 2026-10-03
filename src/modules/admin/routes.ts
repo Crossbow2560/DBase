@@ -1,36 +1,12 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { config } from "../../config.js";
-import { AppError } from "../accounts/errors.js";
-import { resolveSession, getStorageBreakdown, getSystemStorageBreakdown } from "../accounts/service.js";
+import { getStorageBreakdown, getSystemStorageBreakdown } from "../accounts/service.js";
 import * as admin from "./user-admin-service.js";
 import * as lifecycle from "../lifecycle/lifecycle-service.js";
 import * as backup from "./backup-service.js";
 import { sendAdminEmail } from "./notify-service.js";
 import { listReceivedEmails } from "../email/inbound-service.js";
-
-async function requireSession(request: FastifyRequest) {
-  const rawToken = request.cookies[config.sessionCookieName];
-  if (!rawToken) throw new AppError(401, "UNAUTHENTICATED", "Login required.");
-  const session = await resolveSession(rawToken);
-  if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
-  request.session = session;
-}
-
-/**
- * DESIGN.md §4.2: the admin bypass inside checkPermission() governs item-level access; this is
- * the separate, coarser gate on the admin API surface itself — every route in this file is
- * admin-only regardless of any item-level permission.
- */
-async function requireAdmin(request: FastifyRequest) {
-  await requireSession(request);
-  if (request.session!.user.role !== "admin") {
-    throw new AppError(403, "INSUFFICIENT_PERMISSION", "Admin access required.");
-  }
-}
-
-const writeHeavyRateLimit = {
-  config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
-} as const;
+import { requireAdmin, writeHeavyRateLimit } from "../accounts/guards.js";
 
 export async function adminRoutes(app: FastifyInstance) {
   app.get("/api/v1/admin/users", { preHandler: requireAdmin }, async (_request, reply) => {

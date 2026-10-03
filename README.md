@@ -31,7 +31,7 @@ npm install
 npm run migrate               # apply supabase/migrations/*.sql
 npm run prisma:generate
 docker compose up --build -d
-docker compose exec backend npm run bootstrap:admin -- --email=admin@example.com --password=changeme123 --name="System Admin"
+docker compose exec -it backend npm run bootstrap:admin -- --email=admin@example.com --name="System Admin"
 ```
 
 Open http://localhost:3001 and log in as the admin.
@@ -69,13 +69,15 @@ Details: [docs/architecture.md](docs/architecture.md).
 ```
 .
 ├── src/                 # Fastify backend
-│   ├── server.ts        # bootstrap: plugins, error handler, routes, workers
+│   ├── app.ts           # buildApp(): plugins, rate limits, error handler, routes
+│   ├── server.ts        # listen + start background workers
 │   ├── modules/         # one folder per domain (routes + services + errors)
 │   ├── workers/         # setInterval background jobs
 │   └── lib/             # password, tokens, email helpers
 ├── scripts/             # migrate.ts, bootstrap-admin.ts
 ├── supabase/migrations/ # SQL source of truth for the schema
 ├── prisma/              # schema.prisma (client generation only)
+├── test/                # integration suites (real Postgres + MinIO) and a local preview env
 ├── web/                 # Next.js frontend
 ├── docs/                # documentation
 └── docker-compose.yml   # backend, frontend, minio, minio-init

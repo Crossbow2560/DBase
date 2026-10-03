@@ -1,31 +1,50 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config.js";
-import { AppError } from "../accounts/errors.js";
-import { resolveSession } from "../accounts/service.js";
-import type { ItemType } from "./permission-check.js";
 import * as permissions from "./permission-service.js";
 import * as shareLinks from "./share-link-service.js";
+import { requireSession, parseItemType, publicRateLimit, publicZipRateLimit } from "../accounts/guards.js";
+import type { UnlockGrant } from "./share-link-service.js";
 
-// Same duplicated-requireSession pattern as filesystem/routes.ts — see that file's comment on
-// why (APPLICATION_DESIGN.md §3.3's shared-module consolidation belongs to a later pass).
-async function requireSession(request: FastifyRequest) {
-  const rawToken = request.cookies[config.sessionCookieName];
-  if (!rawToken) throw new AppError(401, "UNAUTHENTICATED", "Login required.");
-  const session = await resolveSession(rawToken);
-  if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
-  request.session = session;
+const UNLOCK_COOKIE = "dbase_share_unlock";
+
+// Scoped to this one link's public API path, so a browser only ever sends a link's unlock cookie
+// back to that same link's endpoints (and holds one cookie per unlocked link).
+const unlockCookiePath = (token: string) => `/api/v1/public/share-links/${encodeURIComponent(token)}`;
+
+function setUnlockCookie(reply: FastifyReply, token: string, grant: UnlockGrant) {
+  reply.setCookie(UNLOCK_COOKIE, `${grant.linkId}.${grant.expiresAt}`, {
+    signed: true,
+    httpOnly: true,
+    secure: config.cookieSecure,
+    sameSite: "lax",
+    path: unlockCookiePath(token),
+    expires: new Date(grant.expiresAt),
+  });
 }
 
-// Same reasoning as filesystem/routes.ts's identical constant: a slow streamed zip response,
-// bounded by the shared folder's own contents, not a generic per-minute request count.
-const noRateLimit = { config: { rateLimit: false } } as const;
-
-function parseItemType(raw: string): ItemType {
-  if (raw !== "file" && raw !== "folder") {
-    throw new AppError(400, "VALIDATION_ERROR", "type must be 'file' or 'folder'.");
-  }
-  return raw;
+/** The unlock grant from a correctly-signed cookie, or null (missing, tampered, or malformed). */
+function readUnlockGrant(request: FastifyRequest): UnlockGrant | null {
+  const raw = request.cookies[UNLOCK_COOKIE];
+  if (!raw) return null;
+  const unsigned = request.unsignCookie(raw);
+  if (!unsigned.valid || !unsigned.value) return null;
+  const [linkId, expiresAt] = unsigned.value.split(".");
+  if (!linkId || !expiresAt || !/^\d+$/.test(expiresAt)) return null;
+  return { linkId, expiresAt: Number(expiresAt) };
 }
+
+// Brute-force bound for link passwords: per client IP AND per link, so guessing at one link can't
+// lock other visitors out of it (the old per-link counter could) and can't spend budget on others.
+const unlockRateLimit = {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: "15 minutes",
+      keyGenerator: (request: FastifyRequest) =>
+        `unlock:${request.ip}:${(request.params as { token?: string }).token ?? ""}`,
+    },
+  },
+} as const;
 
 export async function accessRoutes(app: FastifyInstance) {
   app.post(
@@ -128,41 +147,52 @@ export async function accessRoutes(app: FastifyInstance) {
   // §5.5: access without an account. `folderId` lets a folder-type link's visitor browse into
   // subfolders; share-link-service.ts's own scope check (not checkPermission — there's no
   // userId) is what keeps that walk confined to the shared subtree.
-  app.get("/api/v1/public/share-links/:token", async (request, reply) => {
+  app.post(
+    "/api/v1/public/share-links/:token/unlock",
+    {
+      ...unlockRateLimit,
+      schema: { body: { type: "object", required: ["password"], properties: { password: { type: "string" } } } },
+    },
+    async (request, reply) => {
+      const { token } = request.params as { token: string };
+      const { password } = request.body as { password: string };
+      const grant = await shareLinks.unlockShareLink(token, password);
+      if (grant) setUnlockCookie(reply, token, grant);
+      reply.code(204).send();
+    },
+  );
+
+  app.get("/api/v1/public/share-links/:token", { ...publicRateLimit }, async (request, reply) => {
     const { token } = request.params as { token: string };
-    const { password, folderId } = request.query as { password?: string; folderId?: string };
-    const contents = await shareLinks.getPublicFolderContents(token, password, folderId);
+    const { folderId } = request.query as { folderId?: string };
+    const contents = await shareLinks.getPublicFolderContents(token, readUnlockGrant(request), folderId);
     reply.send(contents);
   });
 
-  app.get("/api/v1/public/share-links/:token/files/:fileId/download", async (request, reply) => {
+  app.get("/api/v1/public/share-links/:token/files/:fileId/download", { ...publicRateLimit }, async (request, reply) => {
     const { token, fileId } = request.params as { token: string; fileId: string };
-    const { password } = request.query as { password?: string };
-    const url = await shareLinks.getPublicDownloadUrl(token, password, fileId);
+    const url = await shareLinks.getPublicDownloadUrl(token, readUnlockGrant(request), fileId);
     reply.send({ url });
   });
 
-  app.get("/api/v1/public/share-links/:token/files/:fileId/preview", async (request, reply) => {
+  app.get("/api/v1/public/share-links/:token/files/:fileId/preview", { ...publicRateLimit }, async (request, reply) => {
     const { token, fileId } = request.params as { token: string; fileId: string };
-    const { password } = request.query as { password?: string };
-    const preview = await shareLinks.getPublicPreviewUrl(token, password, fileId);
+    const preview = await shareLinks.getPublicPreviewUrl(token, readUnlockGrant(request), fileId);
     reply.send(preview ? { available: true, ...preview } : { available: false });
   });
 
-  app.get("/api/v1/public/share-links/:token/files/:fileId/thumbnail", async (request, reply) => {
+  app.get("/api/v1/public/share-links/:token/files/:fileId/thumbnail", { ...publicRateLimit }, async (request, reply) => {
     const { token, fileId } = request.params as { token: string; fileId: string };
-    const { password } = request.query as { password?: string };
-    const url = await shareLinks.getPublicThumbnailUrl(token, password, fileId);
+    const url = await shareLinks.getPublicThumbnailUrl(token, readUnlockGrant(request), fileId);
     reply.send(url ? { available: true, url } : { available: false });
   });
 
   app.get(
     "/api/v1/public/share-links/:token/folders/:folderId/download-zip",
-    { ...noRateLimit },
+    { ...publicZipRateLimit },
     async (request, reply) => {
       const { token, folderId } = request.params as { token: string; folderId: string };
-      const { password } = request.query as { password?: string };
-      const { archive, folderName } = await shareLinks.getPublicFolderZipArchive(token, password, folderId);
+        const { archive, folderName } = await shareLinks.getPublicFolderZipArchive(token, readUnlockGrant(request), folderId);
       reply.header("Content-Type", "application/zip");
       reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(folderName)}.zip`);
       return reply.send(archive);

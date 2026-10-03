@@ -40,5 +40,18 @@ export const uploadSessionNotFound = () =>
 export const uploadSessionInvalid = () =>
   new AppError(409, "UPLOAD_SESSION_INVALID", "This upload's destination is no longer valid.");
 
+export const partNumberOutOfRange = (totalParts: number) =>
+  new AppError(400, "VALIDATION_ERROR", `Part number must be between 0 and ${totalParts - 1}.`);
+
+export const partTooSmall = (minBytes: number) =>
+  new AppError(
+    400,
+    "PART_TOO_SMALL",
+    `Every part except the last must be at least ${minBytes} bytes.`,
+  );
+
+export const uploadIncomplete = () =>
+  new AppError(409, "UPLOAD_SESSION_INVALID", "Not every part of this upload has been received yet.");
+
 export const noLongerAvailable = () =>
   new AppError(404, "NO_LONGER_AVAILABLE", "This file is no longer available.");

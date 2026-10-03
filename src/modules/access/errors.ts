@@ -11,5 +11,5 @@ export const shareLinkNotFound = () =>
 export const invalidSharePassword = () =>
   new AppError(401, "INVALID_PASSWORD", "Incorrect password.");
 
-export const tooManyPasswordAttempts = () =>
-  new AppError(429, "RATE_LIMITED", "Too many password attempts on this link. Try again later.");
+export const sharePasswordRequired = () =>
+  new AppError(401, "PASSWORD_REQUIRED", "This link is password-protected.");

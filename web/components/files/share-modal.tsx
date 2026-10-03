@@ -7,8 +7,9 @@
 
 import * as React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { Check, Copy, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
+import { formatDate } from "@/lib/format";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,9 +23,10 @@ interface Collaborator {
   role: Role;
 }
 
+// The server only stores a hash of each link's token (supabase/migrations/0024), so an existing
+// link's URL can't be shown again — only right after creation (createdLinkToken below).
 interface ShareLink {
   id: string;
-  token: string;
   role: Role;
   hasPassword: boolean;
   expiresAt: string | null;
@@ -63,6 +65,7 @@ export function ShareModal({
   const [linkRole, setLinkRole] = React.useState<Role>("viewer");
   const [linkPassword, setLinkPassword] = React.useState("");
   const [createdLinkToken, setCreatedLinkToken] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
   const [transferEmail, setTransferEmail] = React.useState("");
   const [transferError, setTransferError] = React.useState<string | null>(null);
   const [transferDone, setTransferDone] = React.useState(false);
@@ -101,6 +104,7 @@ export function ShareModal({
       password: linkPassword || undefined,
     });
     setCreatedLinkToken(token);
+    setCopied(false);
     setLinkPassword("");
     invalidateLinks();
   }
@@ -112,6 +116,16 @@ export function ShareModal({
 
   function linkUrl(token: string) {
     return `${window.location.origin}/s/${token}`;
+  }
+
+  async function copyCreatedLink() {
+    if (!createdLinkToken) return;
+    try {
+      await navigator.clipboard.writeText(linkUrl(createdLinkToken));
+      setCopied(true);
+    } catch {
+      // Clipboard can be unavailable (permissions, non-secure context); the URL stays selectable.
+    }
   }
 
   async function transferOwnership(e: React.FormEvent) {
@@ -196,10 +210,12 @@ export function ShareModal({
             {links?.links.map((link) => (
               <li key={link.id} className="flex items-center justify-between gap-2 px-3 py-2 text-sm">
                 <span className="truncate">
-                  {linkUrl(link.token)}{" "}
+                  <span className="capitalize">{link.role}</span> link
                   <span className="text-muted-foreground">
-                    ({link.role}
-                    {link.hasPassword ? ", password-protected" : ""})
+                    {" · created "}
+                    {formatDate(link.createdAt)}
+                    {link.hasPassword ? " · password-protected" : ""}
+                    {link.expiresAt ? ` · expires ${formatDate(link.expiresAt)}` : ""}
                   </span>
                 </span>
                 {link.createdBy === user?.id && (
@@ -230,9 +246,18 @@ export function ShareModal({
             <Button type="submit">Create link</Button>
           </form>
           {createdLinkToken && (
-            <p className="break-all rounded-md bg-muted/50 p-2 text-sm">
-              Link created: {linkUrl(createdLinkToken)}
-            </p>
+            <div className="space-y-1 rounded-md bg-muted/50 p-2 text-sm">
+              <div className="flex items-start gap-2">
+                <span className="flex-1 select-all break-all">{linkUrl(createdLinkToken)}</span>
+                <Button type="button" variant="outline" size="sm" onClick={copyCreatedLink}>
+                  {copied ? <Check className="h-4 w-4" aria-hidden /> : <Copy className="h-4 w-4" aria-hidden />}
+                  {copied ? "Copied" : "Copy"}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Copy this link now — for security it won&apos;t be shown again.
+              </p>
+            </div>
           )}
         </section>
 

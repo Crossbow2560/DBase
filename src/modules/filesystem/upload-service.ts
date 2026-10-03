@@ -11,6 +11,9 @@ import {
   systemStorageLimitExceeded,
   uploadSessionNotFound,
   uploadSessionInvalid,
+  partNumberOutOfRange,
+  partTooSmall,
+  uploadIncomplete,
 } from "./errors.js";
 import { checkPermission } from "../access/permission-check.js";
 import { createOwnerPermission } from "../access/permission-service.js";
@@ -62,83 +65,159 @@ export async function uploadPart(userId: string, sessionId: string, partNumber: 
   const session = await db.upload_sessions.findFirst({ where: { id: sessionId, user_id: userId } });
   if (!session || session.status !== "pending") throw uploadSessionNotFound();
   if (session.expires_at < new Date()) throw uploadSessionNotFound();
-
-  const existingPart = await db.upload_session_parts.findUnique({
-    where: { upload_session_id_part_number: { upload_session_id: sessionId, part_number: partNumber } },
-  });
-  if (existingPart) {
-    return; // already recorded — idempotent retry, no re-charge, no re-upload.
+  // Parts are 0-indexed (web/lib/uploads.tsx) and storage.completeMultipartUpload composes exactly
+  // 0..total_parts-1 — any other number would be charged against quota yet never composed or
+  // cleaned up.
+  if (!Number.isInteger(partNumber) || partNumber < 0 || partNumber >= session.total_parts) {
+    throw partNumberOutOfRange(session.total_parts);
+  }
+  if (partNumber < session.total_parts - 1 && data.byteLength < storage.MIN_PART_SIZE_BYTES) {
+    throw partTooSmall(storage.MIN_PART_SIZE_BYTES);
   }
 
   // Concurrent-mutation guard (REQUIREMENTS.md §5.3): re-verify the destination is still valid
   // before accepting more bytes, not just once at init.
   await assertUploadDestinationStillValid(session);
 
+  // Recording the part and charging quota happen in ONE transaction that holds the session row's
+  // lock (a real bug, fixed). Previously this was read-then-write — look for an existing part row,
+  // charge, upload, then insert — so two simultaneous retries of the same part both saw "not
+  // recorded yet" and both charged; the loser's insert then failed with its charge never refunded.
+  // Holding the lock also serializes against abortClaimedSession(): an abort either waits and then
+  // sees (and refunds) this part, or wins first and this part is rejected before being charged.
   const delta = BigInt(data.byteLength);
-  const credited = await tryCreditQuota(userId, delta);
-  if (!credited) {
-    throw quotaExceeded();
-  }
+  const outcome = await db.$transaction(async (tx) => {
+    await lockPendingSession(tx, sessionId);
+    const existing = await tx.upload_session_parts.findUnique({
+      where: { upload_session_id_part_number: { upload_session_id: sessionId, part_number: partNumber } },
+    });
+    if (existing) return "duplicate" as const; // idempotent retry, no re-charge, no re-upload.
+    await tx.upload_session_parts.create({
+      data: { upload_session_id: sessionId, part_number: partNumber, size_bytes: delta },
+    });
+    if (!(await tryCreditQuota(userId, delta, tx))) throw quotaExceeded(); // rolls back the row too
+    return "claimed" as const;
+  });
+  if (outcome === "duplicate") return;
 
   try {
     await storage.putPart(sessionId, partNumber, data);
   } catch (err) {
-    // Storage write failed after quota was already credited — credit it back so a transient
-    // MinIO error doesn't leave the user's quota worse off than before this part attempt.
-    await tryCreditQuota(userId, -delta);
+    // Storage write failed after the charge — undo both so a retry starts clean. Skipped if the
+    // session is no longer pending: an abort has already refunded this part with the rest.
+    await db.$transaction(async (tx) => {
+      if (!(await lockPendingSession(tx, sessionId, { throwIfMissing: false }))) return;
+      await tx.upload_session_parts.deleteMany({ where: { upload_session_id: sessionId, part_number: partNumber } });
+      await tryCreditQuota(userId, -delta, tx);
+    });
     throw err;
   }
 
-  await db.upload_session_parts.create({
-    data: { upload_session_id: sessionId, part_number: partNumber, size_bytes: delta },
-  });
+  // Aborted while the bytes were in flight: the abort refunded this part already, but may have
+  // removed the temp objects before this one landed — clean up the straggler.
+  const current = await db.upload_sessions.findUnique({ where: { id: sessionId }, select: { status: true } });
+  if (current?.status === "aborted") {
+    await storage.removeUploadParts(sessionId, session.total_parts);
+    throw uploadSessionNotFound();
+  }
 }
 
+/** SELECT … FOR UPDATE on a still-pending session; the lock lives until `tx` commits. */
+async function lockPendingSession(
+  tx: Prisma.TransactionClient,
+  sessionId: string,
+  opts: { throwIfMissing?: boolean } = {},
+): Promise<boolean> {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM upload_sessions WHERE id = ${sessionId}::uuid AND status = 'pending' FOR UPDATE
+  `;
+  if (rows.length === 0 && (opts.throwIfMissing ?? true)) throw uploadSessionNotFound();
+  return rows.length > 0;
+}
+
+/**
+ * Order matters here (a real bug, fixed): the FILES row used to be created before the parts were
+ * composed in MinIO, so a compose failure left a file row pointing at an object that never
+ * existed, with the session still `pending` — the cleanup worker would later abort it and refund
+ * the bytes, leaving a dead file that no longer counted against quota.
+ *
+ * Now: (1) atomically claim the session (pending → complete) so cancel/cleanup can't race this,
+ * (2) compose the object, (3) create the file row, owner permission and session link in one DB
+ * transaction. A compose failure releases the claim back to `pending` (parts are untouched, so
+ * the client can retry or cancel); a DB failure removes the composed object and aborts the
+ * session with a refund.
+ */
 export async function completeUpload(userId: string, sessionId: string, mimeType: string) {
-  const session = await db.upload_sessions.findFirst({ where: { id: sessionId, user_id: userId } });
-  if (!session || session.status !== "pending") throw uploadSessionNotFound();
+  const claimed = await db.upload_sessions.updateMany({
+    where: { id: sessionId, user_id: userId, status: "pending" },
+    data: { status: "complete" },
+  });
+  if (claimed.count === 0) throw uploadSessionNotFound();
+  const session = await db.upload_sessions.findUniqueOrThrow({ where: { id: sessionId } });
+
+  const releaseClaim = () =>
+    db.upload_sessions.updateMany({
+      where: { id: sessionId, status: "complete", file_id: null },
+      data: { status: "pending" },
+    });
 
   const parts = await db.upload_session_parts.findMany({ where: { upload_session_id: sessionId } });
-  if (parts.length !== session.total_parts) {
-    throw uploadSessionInvalid();
+  // Exactly 0..total_parts-1, not just the right count — uploadPart rejects out-of-range numbers,
+  // but this is the check composition actually depends on.
+  const received = new Set(parts.map((p) => p.part_number));
+  for (let i = 0; i < session.total_parts; i++) {
+    if (!received.has(i)) {
+      await releaseClaim();
+      throw uploadIncomplete();
+    }
   }
 
   try {
     await assertUploadDestinationStillValid(session);
   } catch (err) {
-    await abortSession(userId, session);
+    await abortClaimedSession(userId, session, "complete");
     throw err;
   }
 
   const totalBytes = parts.reduce((sum, p) => sum + p.size_bytes, 0n);
   const storageKey = storage.generateStorageKey();
 
+  try {
+    await storage.completeMultipartUpload(sessionId, session.total_parts, storageKey);
+  } catch (err) {
+    await storage.removeObject(storageKey).catch(() => undefined);
+    await releaseClaim();
+    throw err;
+  }
+
   let file;
   try {
-    file = await db.files.create({
-      data: {
-        owner_id: userId,
-        folder_id: session.target_folder_id,
-        name: session.target_name,
-        size_bytes: totalBytes,
-        mime_type: mimeType,
-        storage_key: storageKey,
-        upload_status: "complete",
-      },
+    file = await db.$transaction(async (tx) => {
+      const created = await tx.files.create({
+        data: {
+          owner_id: userId,
+          folder_id: session.target_folder_id,
+          name: session.target_name,
+          size_bytes: totalBytes,
+          mime_type: mimeType,
+          storage_key: storageKey,
+          upload_status: "complete",
+        },
+      });
+      // DESIGN.md §3.6: exactly one owner PERMISSIONS row, inserted with the file itself — same
+      // requirement as folder-service.ts's createFolder.
+      await createOwnerPermission("file", created.id, userId, tx);
+      await tx.upload_sessions.update({ where: { id: sessionId }, data: { file_id: created.id } });
+      return created;
     });
   } catch (err) {
-    await abortSession(userId, session);
+    await storage.removeObject(storageKey).catch(() => undefined);
+    await abortClaimedSession(userId, session, "complete");
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === POSTGRES_UNIQUE_VIOLATION) {
       throw nameCollision();
     }
     throw err;
   }
-
-  await storage.completeMultipartUpload(sessionId, session.total_parts, storageKey);
-
-  // DESIGN.md §3.6: exactly one owner PERMISSIONS row, inserted immediately — same requirement
-  // as folder-service.ts's createFolder. A file created via a completed upload is no exception.
-  await createOwnerPermission("file", file.id, userId);
 
   // REQUIREMENTS.md §5.9: background, best-effort, never blocking this response — enqueueThumbnail
   // only performs a fast DB insert; actual generation happens on the worker's own timer. The
@@ -150,11 +229,6 @@ export async function completeUpload(userId: string, sessionId: string, mimeType
   }
   await enqueueThumbnail(file.id, mimeType);
 
-  await db.upload_sessions.update({
-    where: { id: sessionId },
-    data: { status: "complete", file_id: file.id },
-  });
-
   // REQUIREMENTS.md §5.13: always self-owned at creation (uploads never create an item owned by
   // anyone but the uploader, matching folder-service.ts's createFolder) — subject === actor.
   await logActivity({ actorId: userId, subjectUserId: userId, itemType: "file", itemId: file.id, action: "upload" });
@@ -165,38 +239,53 @@ export async function completeUpload(userId: string, sessionId: string, mimeType
 export async function cancelUpload(userId: string, sessionId: string) {
   const session = await db.upload_sessions.findFirst({ where: { id: sessionId, user_id: userId } });
   if (!session || session.status !== "pending") throw uploadSessionNotFound();
-  await abortSession(userId, session);
+  const aborted = await abortClaimedSession(userId, session, "pending");
+  if (!aborted) throw uploadSessionNotFound(); // lost a race with completion/cleanup
 }
 
 /**
  * DESIGN.md §3.5: a session not resumed before expires_at is automatically abandoned and
  * cleaned up — its bytes removed from storage and not counted against quota. Called by
- * src/workers/upload-session-cleanup.ts on a timer; reuses the exact same abortSession() path
- * an explicit client cancel uses, per that section's "follows the identical procedure, just
- * triggered immediately vs. by the scheduled job" requirement.
+ * src/workers/upload-session-cleanup.ts on a timer; reuses the exact same abort path an explicit
+ * client cancel uses, per that section's "follows the identical procedure, just triggered
+ * immediately vs. by the scheduled job" requirement.
  */
 export async function cleanupExpiredSessions(): Promise<number> {
   const expired = await db.upload_sessions.findMany({
     where: { status: "pending", expires_at: { lt: new Date() } },
   });
+  let count = 0;
   for (const session of expired) {
-    await abortSession(session.user_id, session);
+    if (await abortClaimedSession(session.user_id, session, "pending")) count++;
   }
-  return expired.length;
+  return count;
 }
 
-async function abortSession(
+/**
+ * Moves the session from `fromStatus` to `aborted` with a single conditional UPDATE, and only the
+ * caller that wins that transition refunds the bytes and removes the parts. Cancel, the cleanup
+ * worker and a failing completion can all target the same session concurrently; before this
+ * guard each of them refunded independently (a double refund, caught only by the
+ * storage_used_bytes >= 0 CHECK as a 500). Returns whether this call performed the abort.
+ */
+async function abortClaimedSession(
   userId: string,
   session: { id: string; total_parts: number },
-): Promise<void> {
+  fromStatus: "pending" | "complete",
+): Promise<boolean> {
+  const claimed = await db.upload_sessions.updateMany({
+    where: { id: session.id, status: fromStatus, file_id: null },
+    data: { status: "aborted" },
+  });
+  if (claimed.count === 0) return false;
+
   const parts = await db.upload_session_parts.findMany({ where: { upload_session_id: session.id } });
   const totalBytes = parts.reduce((sum, p) => sum + p.size_bytes, 0n);
-
   if (totalBytes > 0n) {
     await tryCreditQuota(userId, -totalBytes);
   }
   await storage.removeUploadParts(session.id, session.total_parts);
-  await db.upload_sessions.update({ where: { id: session.id }, data: { status: "aborted" } });
+  return true;
 }
 
 /** REQUIREMENTS.md §5.3: destination folder must still be live, and the target name still free. */
@@ -216,9 +305,12 @@ async function assertUploadDestinationStillValid(session: {
   });
 }
 
+// Mirrors the unique indexes (supabase/migrations/0023): inside a folder a name is unique among
+// all live files regardless of owner (an editor uploading into a shared folder collides with the
+// owner's files too); at the root it's unique within this user's own root.
 async function assertNoLiveNameCollision(userId: string, folderId: string | null, name: string): Promise<void> {
   const existing = await db.files.findFirst({
-    where: { owner_id: userId, folder_id: folderId, name, deleted_at: null },
+    where: folderId ? { folder_id: folderId, name, deleted_at: null } : { owner_id: userId, folder_id: null, name, deleted_at: null },
   });
   if (existing) throw nameCollision();
 }
@@ -243,9 +335,13 @@ async function assertNoLiveNameCollision(userId: string, folderId: string | null
  * left to read as an unexplained 500, or worse, conflated with QUOTA_EXCEEDED (this account's
  * own quota is not the problem in this case).
  */
-async function tryCreditQuota(userId: string, delta: bigint): Promise<boolean> {
+async function tryCreditQuota(
+  userId: string,
+  delta: bigint,
+  client: Prisma.TransactionClient = db,
+): Promise<boolean> {
   try {
-    const rows = await db.$queryRaw<{ storage_used_bytes: bigint }[]>`
+    const rows = await client.$queryRaw<{ storage_used_bytes: bigint }[]>`
       UPDATE users
       SET storage_used_bytes = storage_used_bytes + ${delta}
       WHERE id = ${userId}::uuid

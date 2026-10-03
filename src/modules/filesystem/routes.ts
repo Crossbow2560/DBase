@@ -1,41 +1,10 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
-import { config } from "../../config.js";
+import type { FastifyInstance } from "fastify";
 import { AppError } from "../accounts/errors.js";
-import { resolveSession } from "../accounts/service.js";
 import * as folders from "./folder-service.js";
 import * as files from "./file-service.js";
 import * as uploads from "./upload-service.js";
 import * as thumbnails from "../thumbnails/thumbnail-service.js";
-
-// Subcomponent 1 stub: every route here requires a session (via the same requireSession guard
-// pattern as accounts/routes.ts) but does NOT yet check EFFECTIVE_PERMISSIONS/sharing — that's
-// Subcomponent 2. Every service function scopes to owner_id itself (folder-service.ts's header
-// comment explains why that's a safe stub, not a bypass).
-//
-// Mirrors accounts/routes.ts's requireSession rather than importing it directly — duplicated
-// for now; consolidating into one shared auth precondition belongs to whichever subcomponent
-// first needs a THIRD module to share it (APPLICATION_DESIGN.md §3.3 will want this factored
-// out once `access` exists as its own module).
-async function requireSession(request: FastifyRequest) {
-  const rawToken = request.cookies[config.sessionCookieName];
-  if (!rawToken) throw new AppError(401, "UNAUTHENTICATED", "Login required.");
-  const session = await resolveSession(rawToken);
-  if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
-  request.session = session;
-}
-
-// APPLICATION_DESIGN.md §4.7: folder/file create, move, delete are the "write-heavy" class —
-// a tighter bound (60/min) than the general authenticated default (300/min, server.ts),
-// separate from the read-heavy listing/download endpoints below.
-const writeHeavyRateLimit = {
-  config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
-} as const;
-
-// §4.7's table excludes multipart upload part endpoints from the general per-minute counters
-// entirely — bounded instead by UPLOAD_SESSIONS.total_parts and the session's own lifecycle
-// (DESIGN.md §3.5), not a generic request-rate limiter. A large legitimate upload can exceed a
-// generic per-minute count without being abusive.
-const noRateLimit = { config: { rateLimit: false } } as const;
+import { requireSession, writeHeavyRateLimit, noRateLimit } from "../accounts/guards.js";
 
 export async function filesystemRoutes(app: FastifyInstance) {
   app.get("/api/v1/folders/contents", { preHandler: requireSession }, async (request, reply) => {
@@ -184,7 +153,17 @@ export async function filesystemRoutes(app: FastifyInstance) {
 
   app.put(
     "/api/v1/files/upload-sessions/:id/parts/:partNumber",
-    { preHandler: requireSession, ...noRateLimit },
+    {
+      preHandler: requireSession,
+      ...noRateLimit,
+      schema: {
+        params: {
+          type: "object",
+          required: ["id", "partNumber"],
+          properties: { id: { type: "string", format: "uuid" }, partNumber: { type: "integer", minimum: 0 } },
+        },
+      },
+    },
     async (request, reply) => {
       const { id, partNumber } = request.params as { id: string; partNumber: string };
       const body = request.body;
