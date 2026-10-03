@@ -50,6 +50,12 @@ export const partTooSmall = (minBytes: number) =>
     `Every part except the last must be at least ${minBytes} bytes.`,
   );
 
+export const partTooLarge = (maxBytes: number) =>
+  new AppError(413, "PART_TOO_LARGE", `A single part may be at most ${maxBytes} bytes.`);
+
+export const lengthRequired = () =>
+  new AppError(411, "LENGTH_REQUIRED", "Upload parts must be sent with a Content-Length header.");
+
 export const uploadIncomplete = () =>
   new AppError(409, "UPLOAD_SESSION_INVALID", "Not every part of this upload has been received yet.");
 

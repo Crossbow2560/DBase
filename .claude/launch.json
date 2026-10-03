@@ -4,26 +4,49 @@
     {
       "name": "backend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeArgs": [
+        "run",
+        "dev"
+      ],
       "port": 3000
     },
     {
       "name": "web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "web"],
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "web"
+      ],
       "port": 3001
     },
     {
       "name": "preview-backend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "preview:backend"],
+      "runtimeArgs": [
+        "run",
+        "preview:backend"
+      ],
       "port": 3105
     },
     {
       "name": "preview-web",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-c", "BACKEND_URL=http://localhost:3105 FRONTEND_PORT=3110 npm run dev --prefix web"],
+      "runtimeArgs": [
+        "-c",
+        "BACKEND_URL=http://localhost:3105 FRONTEND_PORT=3110 npm run dev --prefix web"
+      ],
       "port": 3110
+    },
+    {
+      "name": "preview-backend-slowdb",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "PREVIEW_DATABASE_URL=postgres://dbase_test:dbase_test@localhost:54400/dbase_preview npm run preview:backend"
+      ],
+      "port": 3105
     }
   ]
 }

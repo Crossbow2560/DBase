@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import Fastify, {
   type FastifyError,
   type FastifyInstance,
+  type FastifyReply,
   type FastifyRequest,
   type FastifyServerOptions,
 } from "fastify";
@@ -52,8 +53,9 @@ export function redactUrlForLog(url: string): string {
  * this directly with app.inject().
  */
 export async function buildApp(options: { logger?: boolean } = {}): Promise<FastifyInstance> {
-  // bodyLimit raised above Fastify's 1MB default: multipart upload part bodies are raw binary,
-  // up to CHUNK_SIZE_BYTES (5MB, web/lib/uploads.tsx) plus headroom.
+  // bodyLimit raised above Fastify's 1MB default for JSON bodies (admin mail, inbound webhooks).
+  // Upload parts are streamed, not parsed, so they aren't subject to it — see the octet-stream
+  // parser below.
   const app = Fastify({
     logger:
       options.logger === false
@@ -114,19 +116,28 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
     timeWindow: "1 minute",
     keyGenerator: (request) => `ipcap:${request.ip}`,
   });
-  app.addHook("onRequest", async (request, reply) => {
+  async function enforceIpCeiling(request: FastifyRequest, reply: FastifyReply) {
     const result = await ipCeiling(request);
     if (!result.isAllowed && result.isExceeded) {
       reply.header("retry-after", result.ttlInSeconds);
       throw new AppError(429, "RATE_LIMITED", `Too many requests. Retry after ${result.ttlInSeconds} seconds.`);
     }
+  }
+  app.decorate("enforceIpCeiling", enforceIpCeiling);
+  app.addHook("onRequest", async (request, reply) => {
+    // Upload parts opt out here and count only failed authentications instead
+    // (accounts/guards.ts requireSessionCountingFailures): one large file is hundreds of
+    // legitimate part requests, and parallel parts on a fast link would otherwise hit the ceiling.
+    if (request.routeOptions.config?.ipCeiling === "auth-failures-only") return;
+    await enforceIpCeiling(request, reply);
   });
 
-  // Multipart upload part bodies (PUT /files/upload-sessions/:id/parts/:n) arrive as raw binary,
-  // not JSON — Fastify has no built-in parser for this content type, so without registering one
-  // explicitly the request would be rejected as an unsupported media type before reaching the
-  // route handler at all.
-  app.addContentTypeParser("application/octet-stream", { parseAs: "buffer" }, (_request, payload, done) => {
+  // Multipart upload part bodies (PUT /files/upload-sessions/:id/parts/:n) arrive as raw binary.
+  // The body is handed to the route as the unread request stream rather than buffered: the part
+  // route pipes it straight to MinIO (storage.putPartStream), so a part never sits in this
+  // process's memory and its upload to MinIO starts while the browser is still sending it. (This
+  // also means bodyLimit doesn't apply to parts; the route enforces MAX_PART_SIZE_BYTES itself.)
+  app.addContentTypeParser("application/octet-stream", (_request, payload, done) => {
     done(null, payload);
   });
 

@@ -228,3 +228,68 @@ describe("atomic completion and race-safe aborts (issue 1)", () => {
     assert.equal(await storageUsed(env, user.id), 0n);
   });
 });
+
+describe("upload throughput path (parallel, streamed, larger parts)", () => {
+  test("parts sent concurrently and out of order compose byte-for-byte", async () => {
+    const { user, cookie } = await createUserAndLogin(env);
+    const partSize = 5 * 1024 * 1024;
+    const data = Buffer.alloc(partSize * 3 + 4321);
+    for (let i = 0; i < data.length; i += 3001) data[i] = (i / 3001) % 256;
+    const sid = await initSession(cookie, 4, "parallel.bin");
+    const order = [3, 1, 0, 2];
+    const results = await Promise.all(
+      order.map((n) => putPart(env, cookie, sid, n, data.subarray(n * partSize, (n + 1) * partSize))),
+    );
+    for (const r of results) assert.equal(r.statusCode, 204, r.body);
+    const done = await api(env, cookie).post(`/files/upload-sessions/${sid}/complete`, {});
+    assert.equal(done.statusCode, 200, done.body);
+    assert.equal(await storageUsed(env, user.id), BigInt(data.length));
+    const dl = await api(env, cookie).get(`/files/${done.json().file.id}/download`);
+    const body = Buffer.from(await (await fetch(dl.json().url)).arrayBuffer());
+    assert.ok(body.equals(data));
+  });
+
+  test("a 32 MiB part is accepted; one over 64 MiB is refused before anything is charged", async () => {
+    const { user, cookie } = await createUserAndLogin(env);
+    const sid = await initSession(cookie, 2);
+    assert.equal((await putPart(env, cookie, sid, 0, Buffer.alloc(32 * 1024 * 1024, 1))).statusCode, 204);
+    assert.equal(await storageUsed(env, user.id), 32n * 1024n * 1024n);
+
+    const big = await putPart(env, cookie, sid, 1, Buffer.alloc(64 * 1024 * 1024 + 1, 2));
+    assert.equal(big.statusCode, 413, big.body);
+    assert.equal(big.json().error.code, "PART_TOO_LARGE");
+    assert.equal(await storageUsed(env, user.id), 32n * 1024n * 1024n);
+  });
+
+  test("a part without Content-Length is refused with 411", async () => {
+    const { Readable } = await import("node:stream");
+    const { cookie } = await createUserAndLogin(env);
+    const sid = await initSession(cookie, 1);
+    const res = await env.app.inject({
+      method: "PUT",
+      url: `/api/v1/files/upload-sessions/${sid}/parts/0`,
+      headers: { cookie, "content-type": "application/octet-stream" },
+      payload: Readable.from([Buffer.alloc(100)]),
+    });
+    assert.equal(res.statusCode, 411, res.body);
+    assert.equal(res.json().error.code, "LENGTH_REQUIRED");
+  });
+
+  test("a body shorter than its declared length is rejected and the charge released", async () => {
+    const { Readable } = await import("node:stream");
+    const { user, cookie } = await createUserAndLogin(env);
+    const sid = await initSession(cookie, 1);
+    const res = await env.app.inject({
+      method: "PUT",
+      url: `/api/v1/files/upload-sessions/${sid}/parts/0`,
+      headers: { cookie, "content-type": "application/octet-stream", "content-length": "2000" },
+      payload: Readable.from([Buffer.alloc(1000)]),
+    });
+    assert.ok(res.statusCode >= 400, `expected failure, got ${res.statusCode}`);
+    assert.equal(await storageUsed(env, user.id), 0n);
+    assert.equal(await env.db.upload_session_parts.count({ where: { upload_session_id: sid } }), 0);
+    // The same part can then be sent properly.
+    assert.equal((await putPart(env, cookie, sid, 0, Buffer.alloc(1000))).statusCode, 204);
+    assert.equal(await storageUsed(env, user.id), 1000n);
+  });
+});

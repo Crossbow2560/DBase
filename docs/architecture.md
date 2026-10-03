@@ -85,17 +85,19 @@ All workers use `setInterval` with an in-memory "tick in progress" flag so ticks
 
 ```
 POST /files                                  → upload_sessions row (pending, expires in 60 min)
-PUT  /files/upload-sessions/:id/parts/:n     → [tx, session row locked] part row + quota charge,
-                                               then MinIO tmp/<id>/part-NNNNNN   (n = 0 … totalParts-1)
+PUT  /files/upload-sessions/:id/parts/:n     → record_upload_part(): session row locked, part row + quota charge,
+                                               then body streamed to MinIO tmp/<id>/part-NNNNNN   (n = 0 … totalParts-1)
 POST /files/upload-sessions/:id/complete     → claim session (pending → complete),
                                                MinIO composeObject → files/<random>,
                                                [tx] files row + owner permission + session link,
                                                thumbnail enqueue, audit log
 ```
 
-- The client (`web/lib/uploads.tsx`) sends 5 MB chunks, runs at most 3 uploads concurrently and retries on 429 using `Retry-After`.
+- The client (`web/lib/uploads.tsx`) sizes parts at about 1/16 of the file (5–32 MiB), sends up to 4 parts of a file at once, runs at most 3 files concurrently and retries on 429 using `Retry-After`.
 - Quota is charged per part with a single conditional `UPDATE users … WHERE used + delta <= quota RETURNING`, so concurrent parts can't overshoot. A system-wide trigger raises `SYSTEM_STORAGE_LIMIT_EXCEEDED` on top of that.
-- Part numbers must be `0 … totalParts-1`, and every part except the last must be at least 5 MiB (MinIO's compose minimum).
+- Part numbers must be `0 … totalParts-1`; every part except the last must be at least 5 MiB (MinIO's compose minimum) and none over 64 MiB.
+- Per part, the server does one database round trip — `record_upload_part()` (`0025`) validates, records the part and charges quota under the session row lock — then pipes the request body to MinIO through a presigned PUT, never buffering it. The destination is validated at init and completion, not per part.
+- The Next.js proxy needs `experimental.middlewareClientMaxBodySize` raised (`web/next.config.js`, 70 MB); its default silently truncates request bodies over 10 MB.
 - Parts are idempotent: re-sending a recorded part is a no-op. Recording the part and charging quota happen in one transaction holding the session row's lock, so concurrent retries charge once and an abort always sees (and refunds) every charged part.
 - Completion composes the object **before** creating the file row. A compose failure returns the session to `pending` (the client can retry or cancel); a DB failure deletes the composed object and aborts with a refund. Cancel, the cleanup worker and a failing completion each claim the session with a conditional update, so only one of them ever refunds.
 - On page load the frontend cancels any upload interrupted by a refresh of that tab (ids kept in `sessionStorage`), releasing its quota immediately.

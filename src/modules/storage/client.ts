@@ -1,6 +1,9 @@
 import { Client as MinioClient, CopySourceOptions, CopyDestinationOptions } from "minio";
 import { randomBytes } from "node:crypto";
-import type { Readable } from "node:stream";
+import http from "node:http";
+import https from "node:https";
+import { Transform, type Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { config } from "../../config.js";
 
 // APPLICATION_DESIGN.md §1.3/§3.2: the ONLY module permitted to construct or dereference a
@@ -53,9 +56,14 @@ export function generateThumbnailKey(): string {
 
 // MinIO's composeObject (completeMultipartUpload below) rejects any source except the last that's
 // smaller than 5 MiB — the same floor as S3 multipart. uploadPart enforces it up front so a too-small
-// part fails immediately with a clear error instead of at completion. web/lib/uploads.tsx's
-// CHUNK_SIZE_BYTES is exactly this value.
+// part fails immediately with a clear error instead of at completion. web/lib/uploads.tsx never
+// picks a part size below this.
 export const MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
+
+// Upper bound per part. Parts stream straight through to MinIO (putPartStream), so this isn't a
+// memory bound — it keeps every request under the 100 MB body limit Cloudflare (this deployment's
+// tunnel) enforces, with headroom. web/lib/uploads.tsx picks part sizes up to 32 MiB.
+export const MAX_PART_SIZE_BYTES = 64 * 1024 * 1024;
 
 function tempPartKey(uploadSessionId: string, partNumber: number): string {
   return `tmp/${uploadSessionId}/part-${String(partNumber).padStart(6, "0")}`;
@@ -68,8 +76,66 @@ export async function ensureBucketExists(): Promise<void> {
   }
 }
 
-export async function putPart(uploadSessionId: string, partNumber: number, data: Buffer): Promise<void> {
-  await client.putObject(BUCKET, tempPartKey(uploadSessionId, partNumber), data);
+/**
+ * Streams one upload part from the incoming request straight into MinIO. Deliberately not
+ * client.putObject(): the SDK reads any object up to its 64 MiB part size fully into memory first,
+ * so a few concurrent 32 MiB parts would cost hundreds of MB of RAM and delay the MinIO write until
+ * the whole part had arrived. Instead the internal client presigns a PUT (a local computation —
+ * REGION is pinned above) and the request body is piped to it with an exact Content-Length, so
+ * memory stays constant and the write to MinIO overlaps the upload from the browser.
+ *
+ * `sizeBytes` is the length the client declared (and was charged for). The stream must deliver
+ * exactly that many bytes; anything else rejects, and the caller releases the charge.
+ */
+export async function putPartStream(
+  uploadSessionId: string,
+  partNumber: number,
+  body: Readable,
+  sizeBytes: number,
+): Promise<void> {
+  const url = new URL(await client.presignedPutObject(BUCKET, tempPartKey(uploadSessionId, partNumber), 15 * 60));
+
+  let received = 0;
+  const exactLength = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      received += chunk.length;
+      if (received > sizeBytes) callback(new Error(`Part body exceeds its declared ${sizeBytes} bytes.`));
+      else callback(null, chunk);
+    },
+    flush(callback) {
+      if (received !== sizeBytes) callback(new Error(`Part body ended at ${received} of ${sizeBytes} bytes.`));
+      else callback();
+    },
+  });
+
+  const transport = url.protocol === "https:" ? https : http;
+  const upstream = transport.request(url, {
+    method: "PUT",
+    headers: { "Content-Length": String(sizeBytes), "Content-Type": "application/octet-stream" },
+    // A fresh connection per part, deliberately: Node's default agent keeps sockets alive and can
+    // hand out one the server has already closed, and a streamed body can't be replayed on another
+    // socket the way a buffered one could. One TCP handshake per part on the Docker-internal network
+    // is negligible next to a multi-MiB transfer.
+    agent: false,
+  });
+  const response = new Promise<http.IncomingMessage>((resolve, reject) => {
+    upstream.once("response", resolve);
+    upstream.once("error", reject);
+  });
+  response.catch(() => undefined); // surfaced through pipeline() below if the request fails early
+
+  await pipeline(body, exactLength, upstream);
+  const res = await response;
+  const responseBody = await new Promise<string>((resolve) => {
+    let text = "";
+    res.setEncoding("utf8");
+    res.on("data", (c: string) => (text += c));
+    res.on("end", () => resolve(text));
+    res.on("error", () => resolve(text));
+  });
+  if ((res.statusCode ?? 500) >= 300) {
+    throw new Error(`MinIO rejected part upload (${res.statusCode}): ${responseBody.slice(0, 500)}`);
+  }
 }
 
 /**

@@ -25,6 +25,8 @@ There is also an unversioned `GET /health` → `{"status":"ok"}`.
 | 403 | `ACCOUNT_DEACTIVATED`, `EMAIL_NOT_VERIFIED`, `INSUFFICIENT_PERMISSION`, `REGISTRATION_CLOSED` |
 | 404 | `NOT_FOUND` (also returned when you lack access, so existence isn't leaked), `SESSION_NOT_FOUND`, `UPLOAD_SESSION_NOT_FOUND`, `NO_LONGER_AVAILABLE` |
 | 409 | `NAME_COLLISION`, `CYCLE_DETECTED`, `NOT_IN_TRASH`, `PURGE_IN_FLIGHT`, `UPLOAD_SESSION_INVALID`, `LAST_ADMIN`, `NO_SYSTEM_ADMIN`, `SYSTEM_STORAGE_ALLOCATION_EXCEEDED` |
+| 411 | `LENGTH_REQUIRED` (upload part without `Content-Length`) |
+| 413 | `PART_TOO_LARGE` (upload part over 64 MiB) |
 | 422 | `QUOTA_EXCEEDED`, `SYSTEM_STORAGE_LIMIT_EXCEEDED` |
 | 429 | `RATE_LIMITED` (comes with a `Retry-After` header) |
 | 500 | `INTERNAL_ERROR` |
@@ -42,7 +44,8 @@ The client IP is taken from `X-Forwarded-For` as appended by trusted proxy hops 
 | Admin backup and restore | 3 / 10 min | session |
 | Public share-link routes, inbound email webhook | 300 / min | client IP |
 | Public share-link folder zip | 10 / min | client IP |
-| Upload parts, authenticated folder zip downloads | none (ceiling still applies) | — |
+| Upload parts | none; authenticated part requests don't count toward the ceiling, failed authentications do | — |
+| Authenticated folder zip downloads | none (ceiling still applies) | — |
 
 ---
 
@@ -96,7 +99,7 @@ Names are NFC-normalized and trimmed. A name may be at most 255 bytes, and the f
 | Method | Path | Body | Response |
 |---|---|---|---|
 | POST | `/files` | `{ targetName, totalParts (≥1), targetFolderId? }` | `201 { uploadSessionId, expiresAt }` |
-| PUT | `/files/upload-sessions/:id/parts/:partNumber` | raw bytes (`application/octet-stream`, ≤10 MB) | `204` |
+| PUT | `/files/upload-sessions/:id/parts/:partNumber` | raw bytes (`application/octet-stream`, with `Content-Length`, ≤64 MiB) | `204` |
 | POST | `/files/upload-sessions/:id/complete` | `{ mimeType? }` | `{ file }` |
 | DELETE | `/files/upload-sessions/:id` | — | `204` (cancels and credits quota back) |
 
@@ -110,7 +113,7 @@ curl -b jar -H 'Content-Type: application/json' -d '{"mimeType":"image/jpeg"}' \
   http://localhost:3000/api/v1/files/upload-sessions/$SID/complete
 ```
 
-Parts are **0-indexed** (`0 … totalParts-1`); every part except the last must be at least 5 MiB, because MinIO's compose step requires it. `complete` fails with `UPLOAD_SESSION_INVALID` unless all `totalParts` parts have been received. Sessions expire after `UPLOAD_SESSION_TTL_MINUTES` (60).
+Parts are **0-indexed** (`0 … totalParts-1`). Every part except the last must be at least 5 MiB (MinIO's compose minimum), and no part may exceed 64 MiB. Parts can be sent in any order and concurrently; the web client sizes parts at about 1/16 of the file (5–32 MiB) and keeps 4 in flight per file. `Content-Length` is required: quota is charged for the declared length and the body is streamed straight to storage, which rejects a body that doesn't match it. `complete` fails with `UPLOAD_SESSION_INVALID` unless all `totalParts` parts have been received. Sessions expire after `UPLOAD_SESSION_TTL_MINUTES` (60).
 
 ## Sharing and access
 

@@ -112,3 +112,40 @@ describe("user lookup is tightly rate-limited (issue 10)", () => {
     assert.equal(blocked.statusCode, 429);
   });
 });
+
+describe("upload parts and the per-IP ceiling", () => {
+  test("authenticated part uploads don't consume the ceiling; fake-cookie attempts still do", async () => {
+    const { createUserAndLogin, api } = await import("./harness.js");
+    const { cookie } = await createUserAndLogin(env);
+    const init = await api(env, cookie).post("/files", { targetName: "many-parts.bin", totalParts: 1 });
+    const sid = init.json().uploadSessionId as string;
+    // More part requests than the ceiling, all from one client: retries of an already-recorded part
+    // are cheap no-ops server-side, so this exercises the route without uploading CAP×5 MiB.
+    for (let i = 0; i < CAP + 10; i++) {
+      const res = await env.app.inject({
+        method: "PUT",
+        url: `/api/v1/files/upload-sessions/${sid}/parts/0`,
+        headers: { cookie, "content-type": "application/octet-stream", "x-forwarded-for": "203.0.113.90" },
+        payload: Buffer.alloc(10),
+      });
+      assert.equal(res.statusCode, 204, `part request ${i}: ${res.body}`);
+    }
+
+    for (let i = 0; i < CAP; i++) {
+      const res = await env.app.inject({
+        method: "PUT",
+        url: `/api/v1/files/upload-sessions/${sid}/parts/0`,
+        headers: { cookie: randomCookie(), "content-type": "application/octet-stream", "x-forwarded-for": "203.0.113.91" },
+        payload: Buffer.alloc(10),
+      });
+      assert.equal(res.statusCode, 401, `fake request ${i}`);
+    }
+    const blocked = await env.app.inject({
+      method: "PUT",
+      url: `/api/v1/files/upload-sessions/${sid}/parts/0`,
+      headers: { cookie: randomCookie(), "content-type": "application/octet-stream", "x-forwarded-for": "203.0.113.91" },
+      payload: Buffer.alloc(10),
+    });
+    assert.equal(blocked.statusCode, 429);
+  });
+});

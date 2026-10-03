@@ -4,7 +4,10 @@ import * as folders from "./folder-service.js";
 import * as files from "./file-service.js";
 import * as uploads from "./upload-service.js";
 import * as thumbnails from "../thumbnails/thumbnail-service.js";
-import { requireSession, writeHeavyRateLimit, noRateLimit } from "../accounts/guards.js";
+import { Readable } from "node:stream";
+import { requireSession, requireSessionCountingFailures, writeHeavyRateLimit, noRateLimit } from "../accounts/guards.js";
+import { lengthRequired, partTooLarge } from "./errors.js";
+import { MAX_PART_SIZE_BYTES } from "../storage/client.js";
 
 export async function filesystemRoutes(app: FastifyInstance) {
   app.get("/api/v1/folders/contents", { preHandler: requireSession }, async (request, reply) => {
@@ -154,8 +157,8 @@ export async function filesystemRoutes(app: FastifyInstance) {
   app.put(
     "/api/v1/files/upload-sessions/:id/parts/:partNumber",
     {
-      preHandler: requireSession,
-      ...noRateLimit,
+      preHandler: requireSessionCountingFailures,
+      config: { rateLimit: false, ipCeiling: "auth-failures-only" },
       schema: {
         params: {
           type: "object",
@@ -165,12 +168,17 @@ export async function filesystemRoutes(app: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { id, partNumber } = request.params as { id: string; partNumber: string };
+      const { id, partNumber } = request.params as { id: string; partNumber: number };
       const body = request.body;
-      if (!Buffer.isBuffer(body)) {
-        throw new AppError(400, "VALIDATION_ERROR", "Part body must be raw binary data.");
+      if (!(body instanceof Readable)) {
+        throw new AppError(400, "VALIDATION_ERROR", "Part body must be raw binary (application/octet-stream).");
       }
-      await uploads.uploadPart(request.session!.user_id, id, Number(partNumber), body);
+      // The declared length is what quota is charged for and what putPartStream holds the body to.
+      const declared = request.headers["content-length"];
+      const sizeBytes = declared !== undefined && /^\d+$/.test(declared) ? Number(declared) : NaN;
+      if (!Number.isSafeInteger(sizeBytes)) throw lengthRequired();
+      if (sizeBytes > MAX_PART_SIZE_BYTES) throw partTooLarge(MAX_PART_SIZE_BYTES);
+      await uploads.uploadPart(request.session!.user_id, id, partNumber, body, sizeBytes);
       reply.code(204).send();
     },
   );

@@ -29,9 +29,9 @@ npm run test:db:down        # optional
 | File | Covers |
 |---|---|
 | `smoke.test.ts` | all migrations apply; register → verify → login → upload → byte-identical download; 401/403 guards; cookie `Secure` flag |
-| `uploads.test.ts` | part-number validation, 5 MiB minimum part size, concurrent part retries charge once, compose failure leaves no orphan row, cancel/cleanup/completion races refund exactly once |
+| `uploads.test.ts` | part-number validation, 5 MiB minimum / 64 MiB maximum part size, `Content-Length` required and enforced, concurrent and out-of-order parts, retries charge once, compose failure leaves no orphan row, cancel/cleanup/completion races refund exactly once |
 | `names.test.ts` | folder-scoped sibling names in shared folders; migration `0023` renaming existing duplicates within the byte limit |
-| `ratelimit.test.ts` | per-IP ceiling vs rotating cookies, `X-Forwarded-For` trust, login lockout isolated per client, user-lookup limit |
+| `ratelimit.test.ts` | per-IP ceiling vs rotating cookies, `X-Forwarded-For` trust, login lockout isolated per client, user-lookup limit, upload parts exempt from the ceiling except failed authentications |
 | `share-links.test.ts` | unlock cookie flow, no passwords in URLs, tampered/cross-link cookies, no cross-visitor lockout, hashed tokens, migration `0024`, log redaction |
 | `permissions.test.ts` | direct/inherited/highest grants, deactivated granters, admin bypass, search over shared folders, shared-with-me |
 | `invariants.test.ts` | per-user quota, system limit pre-allocation, last-admin protection, trash restore/purge (object + quota), share-link scope and expiry |
@@ -57,6 +57,12 @@ npm run preview:seed        # database dbase_preview + bucket + two test account
 ```
 
 Then start the `preview-backend` (port 3105) and `preview-web` (port 3110) configurations from `.claude/launch.json`.
+
+### Upload benchmark
+
+`test/preview/upload-bench.ts` uploads through the real endpoints with a chosen part size and parallelism, e.g. `npx tsx test/preview/upload-bench.ts --mb=1024 --part-mib=32 --in-flight=4`. Production's database is remote, so per-part round trips matter. For realistic numbers, run the `preview-backend-slowdb` configuration, which reaches the database through a Toxiproxy adding latency (setup in the script's header).
+
+The test MinIO stores data in tmpfs (about 7.6 GB). Large benchmark runs can fill it with deleted-object trash before MinIO reclaims it; `npm run test:db:down && npm run test:db:up` resets it.
 
 ## Static checks
 

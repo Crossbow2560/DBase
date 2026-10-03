@@ -77,7 +77,7 @@ Scaling out would mean a shared rate-limit store (`@fastify/rate-limit` supports
 
 ## Custom chunked upload instead of S3 multipart
 
-**Decision:** each 5 MB part is stored as `tmp/<session>/part-NNNNNN`, then combined with MinIO's server-side `composeObject` into a random `files/<64 hex>` key.
+**Decision:** each part (5–32 MiB, sized to the file) is streamed through the backend to `tmp/<session>/part-NNNNNN`, then combined with MinIO's server-side `composeObject` into a random `files/<64 hex>` key.
 
 **Why:**
 - Quota is checked and charged per part, so an upload is rejected when it would exceed quota rather than after it finishes.
@@ -85,7 +85,11 @@ Scaling out would mean a shared rate-limit store (`@fastify/rate-limit` supports
 - Abandoned sessions are swept by a timer that credits the quota back.
 - Random keys keep `storage_key` unguessable.
 
-**Rate limiting:** upload-part endpoints are deliberately excluded from rate limits. The client caps concurrency at 3 and honors `Retry-After` instead.
+**Rate limiting:** upload-part endpoints are deliberately excluded from rate limits; authenticated part requests don't count toward the per-IP ceiling either (only failed authentications do). The client caps concurrency instead.
+
+**Throughput:** large uploads were bound by per-part overhead, not bandwidth. Each 5 MiB part waited for ~11 sequential database round trips plus two proxy hops, so one part at a time reached about 8 MB/s against a database 50 ms away. The fix keeps this architecture but removes the overhead: one database round trip per part (`record_upload_part()`), bodies piped to MinIO instead of buffered, parts sized to the file, and 4 parts in flight per file. Measured with a 50 ms database round trip (`test/preview/upload-bench.ts`): 7.8 MB/s before, ~95 MB/s for a 200 MB file and ~230 MB/s for 1 GB after.
+
+**Rejected for now:** presigned uploads straight from the browser to MinIO. That would skip Node and Next entirely, but it means reserving quota by declared size instead of charging per received part, MinIO CORS, and replacing the compose path with native S3 multipart. Worth revisiting if the backend becomes the bottleneck.
 
 ## Asynchronous deletion and thumbnails through DB-backed queues
 

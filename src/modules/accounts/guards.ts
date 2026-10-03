@@ -1,4 +1,4 @@
-import type { FastifyRequest } from "fastify";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { config } from "../../config.js";
 import { AppError } from "./errors.js";
 import { resolveSession } from "./service.js";
@@ -16,6 +16,21 @@ export async function requireSession(request: FastifyRequest) {
   if (!session) throw new AppError(401, "UNAUTHENTICATED", "Session is invalid or has expired.");
   request.session = session;
   request.rawSessionToken = rawToken;
+}
+
+/**
+ * requireSession for routes that opt out of the per-IP ceiling (config.ipCeiling =
+ * "auth-failures-only" — upload parts): a request that fails authentication still counts against
+ * the ceiling, so made-up cookies can't be used to hammer the route, while authenticated part
+ * uploads don't consume it at all.
+ */
+export async function requireSessionCountingFailures(request: FastifyRequest, reply: FastifyReply) {
+  try {
+    await requireSession(request);
+  } catch (err) {
+    await request.server.enforceIpCeiling(request, reply);
+    throw err;
+  }
 }
 
 /**

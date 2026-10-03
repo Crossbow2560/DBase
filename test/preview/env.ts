@@ -9,7 +9,10 @@ export const PREVIEW_ADMIN_DB_URL = `postgres://dbase_test:dbase_test@localhost:
 
 export function previewEnv(): Record<string, string> {
   return {
-    DATABASE_URL: `postgres://dbase_test:dbase_test@localhost:${TEST_DB_PORT}/${PREVIEW_DB_NAME}`,
+    // PREVIEW_DATABASE_URL lets benchmarks route the same database through a latency proxy
+    // (see test/preview/upload-bench.ts) to approximate a remote Supabase pooler.
+    DATABASE_URL:
+      process.env.PREVIEW_DATABASE_URL ?? `postgres://dbase_test:dbase_test@localhost:${TEST_DB_PORT}/${PREVIEW_DB_NAME}`,
     MINIO_ENDPOINT: "localhost",
     MINIO_PORT: TEST_MINIO_PORT,
     MINIO_USE_SSL: "false",

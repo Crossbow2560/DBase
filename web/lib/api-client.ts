@@ -26,6 +26,8 @@ export type KnownErrorCode =
   | "NAME_TOO_LONG"
   | "CYCLE_DETECTED"
   | "PART_TOO_SMALL"
+  | "PART_TOO_LARGE"
+  | "LENGTH_REQUIRED"
   | "UPLOAD_SESSION_INVALID"
   | "RATE_LIMITED"
   | "INTERNAL_ERROR";

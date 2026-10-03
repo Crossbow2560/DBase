@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Readable } from "node:stream";
 import { Prisma } from "@prisma/client";
 import { db } from "../../db.js";
 import { config } from "../../config.js";
@@ -13,6 +14,7 @@ import {
   uploadSessionInvalid,
   partNumberOutOfRange,
   partTooSmall,
+  partTooLarge,
   uploadIncomplete,
 } from "./errors.js";
 import { checkPermission } from "../access/permission-check.js";
@@ -56,60 +58,76 @@ export async function initUploadSession(
   return { uploadSessionId: id, expiresAt };
 }
 
+type RecordOutcome =
+  | "recorded"
+  | "duplicate"
+  | "session_gone"
+  | "part_out_of_range"
+  | "part_too_small"
+  | "part_too_large";
+
 /**
- * REQUIREMENTS.md §5.3/§5.6: each part is checked against quota as it completes, rejected at
- * the point the excess would occur — not allowed to complete and roll back after. Idempotent: a
- * retried part number that already succeeded is a no-op, not a double charge.
+ * REQUIREMENTS.md §5.3/§5.6: each part is checked against quota before its bytes are stored,
+ * rejected at the point the excess would occur. Idempotent: a retried part number that was already
+ * recorded is a no-op, not a double charge.
+ *
+ * Built for throughput (uploads of large files were bound by per-part overhead, not bandwidth):
+ *   - Validation, the duplicate check and the quota charge are ONE database round trip —
+ *     record_upload_part() (supabase/migrations/0025), which holds the session row's lock while it
+ *     inserts the part row and charges, preserving the race guarantees of the old transaction
+ *     (concurrent retries charge once; an abort either sees this part or rejects it uncharged).
+ *   - The quota is charged for the client's declared Content-Length, and the body then streams
+ *     straight to MinIO (storage.putPartStream), which enforces that the length matches exactly.
+ *   - The destination isn't re-validated per part; init and completion both check it, and nothing a
+ *     part does depends on it.
+ * Parts may arrive in any order and concurrently; completion composes them by number.
  */
-export async function uploadPart(userId: string, sessionId: string, partNumber: number, data: Buffer) {
-  const session = await db.upload_sessions.findFirst({ where: { id: sessionId, user_id: userId } });
-  if (!session || session.status !== "pending") throw uploadSessionNotFound();
-  if (session.expires_at < new Date()) throw uploadSessionNotFound();
-  // Parts are 0-indexed (web/lib/uploads.tsx) and storage.completeMultipartUpload composes exactly
-  // 0..total_parts-1 — any other number would be charged against quota yet never composed or
-  // cleaned up.
-  if (!Number.isInteger(partNumber) || partNumber < 0 || partNumber >= session.total_parts) {
-    throw partNumberOutOfRange(session.total_parts);
-  }
-  if (partNumber < session.total_parts - 1 && data.byteLength < storage.MIN_PART_SIZE_BYTES) {
-    throw partTooSmall(storage.MIN_PART_SIZE_BYTES);
+export async function uploadPart(
+  userId: string,
+  sessionId: string,
+  partNumber: number,
+  body: Readable,
+  sizeBytes: number,
+) {
+  let outcome: RecordOutcome;
+  let totalParts: number | null;
+  try {
+    const rows = await db.$queryRaw<{ outcome: RecordOutcome; total_parts: number | null }[]>`
+      SELECT outcome, total_parts FROM record_upload_part(
+        ${sessionId}::uuid, ${userId}::uuid, ${partNumber}::int, ${BigInt(sizeBytes)}::bigint,
+        ${BigInt(storage.MIN_PART_SIZE_BYTES)}::bigint, ${BigInt(storage.MAX_PART_SIZE_BYTES)}::bigint
+      )
+    `;
+    outcome = rows[0]!.outcome;
+    totalParts = rows[0]!.total_parts;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("SYSTEM_STORAGE_LIMIT_EXCEEDED")) throw systemStorageLimitExceeded();
+    if (err instanceof Error && err.message.includes("QUOTA_EXCEEDED")) throw quotaExceeded();
+    throw err;
   }
 
-  // Concurrent-mutation guard (REQUIREMENTS.md §5.3): re-verify the destination is still valid
-  // before accepting more bytes, not just once at init.
-  await assertUploadDestinationStillValid(session);
-
-  // Recording the part and charging quota happen in ONE transaction that holds the session row's
-  // lock (a real bug, fixed). Previously this was read-then-write — look for an existing part row,
-  // charge, upload, then insert — so two simultaneous retries of the same part both saw "not
-  // recorded yet" and both charged; the loser's insert then failed with its charge never refunded.
-  // Holding the lock also serializes against abortClaimedSession(): an abort either waits and then
-  // sees (and refunds) this part, or wins first and this part is rejected before being charged.
-  const delta = BigInt(data.byteLength);
-  const outcome = await db.$transaction(async (tx) => {
-    await lockPendingSession(tx, sessionId);
-    const existing = await tx.upload_session_parts.findUnique({
-      where: { upload_session_id_part_number: { upload_session_id: sessionId, part_number: partNumber } },
-    });
-    if (existing) return "duplicate" as const; // idempotent retry, no re-charge, no re-upload.
-    await tx.upload_session_parts.create({
-      data: { upload_session_id: sessionId, part_number: partNumber, size_bytes: delta },
-    });
-    if (!(await tryCreditQuota(userId, delta, tx))) throw quotaExceeded(); // rolls back the row too
-    return "claimed" as const;
-  });
-  if (outcome === "duplicate") return;
+  switch (outcome) {
+    case "session_gone":
+      throw uploadSessionNotFound();
+    case "part_out_of_range":
+      throw partNumberOutOfRange(totalParts!);
+    case "part_too_small":
+      throw partTooSmall(storage.MIN_PART_SIZE_BYTES);
+    case "part_too_large":
+      throw partTooLarge(storage.MAX_PART_SIZE_BYTES);
+    case "duplicate":
+      return; // already recorded — idempotent retry, no re-charge, no re-upload.
+    case "recorded":
+      break;
+  }
 
   try {
-    await storage.putPart(sessionId, partNumber, data);
+    await storage.putPartStream(sessionId, partNumber, body, sizeBytes);
   } catch (err) {
-    // Storage write failed after the charge — undo both so a retry starts clean. Skipped if the
-    // session is no longer pending: an abort has already refunded this part with the rest.
-    await db.$transaction(async (tx) => {
-      if (!(await lockPendingSession(tx, sessionId, { throwIfMissing: false }))) return;
-      await tx.upload_session_parts.deleteMany({ where: { upload_session_id: sessionId, part_number: partNumber } });
-      await tryCreditQuota(userId, -delta, tx);
-    });
+    // The bytes never fully reached storage (client disconnected, length mismatch, MinIO error):
+    // undo the record and the charge so a retry starts clean. A no-op if the session was aborted
+    // meanwhile — that abort already refunded this part along with the rest.
+    await db.$queryRaw`SELECT release_upload_part(${sessionId}::uuid, ${userId}::uuid, ${partNumber}::int)`;
     throw err;
   }
 
@@ -117,22 +135,9 @@ export async function uploadPart(userId: string, sessionId: string, partNumber: 
   // removed the temp objects before this one landed — clean up the straggler.
   const current = await db.upload_sessions.findUnique({ where: { id: sessionId }, select: { status: true } });
   if (current?.status === "aborted") {
-    await storage.removeUploadParts(sessionId, session.total_parts);
+    await storage.removeUploadParts(sessionId, totalParts!);
     throw uploadSessionNotFound();
   }
-}
-
-/** SELECT … FOR UPDATE on a still-pending session; the lock lives until `tx` commits. */
-async function lockPendingSession(
-  tx: Prisma.TransactionClient,
-  sessionId: string,
-  opts: { throwIfMissing?: boolean } = {},
-): Promise<boolean> {
-  const rows = await tx.$queryRaw<{ id: string }[]>`
-    SELECT id FROM upload_sessions WHERE id = ${sessionId}::uuid AND status = 'pending' FOR UPDATE
-  `;
-  if (rows.length === 0 && (opts.throwIfMissing ?? true)) throw uploadSessionNotFound();
-  return rows.length > 0;
 }
 
 /**

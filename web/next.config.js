@@ -17,6 +17,14 @@ const nextConfig = {
   // its own package-lock.json), not an accidental monorepo — pin the root explicitly so Next
   // doesn't guess wrong and warn about it.
   outputFileTracingRoot: path.join(__dirname),
+  experimental: {
+    // Every request this server proxies to the backend (the /api/v1 rewrite below) passes through
+    // Next's cloneable-body layer, which silently TRUNCATES bodies beyond this size (default 10 MB)
+    // and holds a copy of the body in memory while proxying. Upload parts are up to 32 MiB
+    // (web/lib/uploads.tsx; the backend accepts up to 64 MiB), so the default broke every part
+    // larger than 10 MB — the backend's exact-length check rejected the truncated bodies.
+    middlewareClientMaxBodySize: "70mb",
+  },
   // FRONTEND_DESIGN.md §7: a rewrite, not a hand-written Route Handler — a rewrite transparently
   // forwards the request (including the Cookie header) by construction. A Route Handler that
   // manually re-forwarded headers would risk silently dropping the session cookie on a

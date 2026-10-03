@@ -85,12 +85,33 @@ export async function setupTestEnv(overrides: Record<string, string> = {}): Prom
     teardown: async () => {
       await app.close();
       await db.$disconnect();
+      // Remove this file's bucket too — the test MinIO keeps data in tmpfs, and leftover buckets
+      // from every run (some tests write 32–64 MiB parts) eventually fill it.
+      await removeBucket(bucket).catch(() => undefined);
       const cleanup = new Client({ connectionString: ADMIN_DB_URL });
       await cleanup.connect();
       await cleanup.query(`drop database if exists ${dbName} with (force)`);
       await cleanup.end();
     },
   };
+}
+
+async function removeBucket(bucket: string) {
+  const { Client: MinioClient } = await import("minio");
+  const minio = new MinioClient({
+    endPoint: "localhost",
+    port: Number(MINIO_PORT),
+    useSSL: false,
+    accessKey: "dbase_test",
+    secretKey: "dbase_test_secret",
+    region: "us-east-1",
+  });
+  const names: string[] = [];
+  for await (const item of minio.listObjectsV2(bucket, "", true)) {
+    if (item.name) names.push(item.name);
+  }
+  if (names.length > 0) await minio.removeObjects(bucket, names);
+  await minio.removeBucket(bucket);
 }
 
 // ---------------------------------------------------------------------------------------------
