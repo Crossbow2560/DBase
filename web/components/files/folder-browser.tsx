@@ -65,6 +65,30 @@ interface FolderContentsItem {
   // Images/Videos/Audio/Files type filter below, matched by prefix.
   mimeType?: string;
   updatedAt: string;
+  // Only present on search results (GET /search?within=…): the folders between the folder being
+  // browsed and the item's parent — empty when the match is directly in this folder.
+  location?: { id: string; name: string }[];
+  parentFolderId?: string | null;
+}
+
+interface FolderSearchResponse {
+  items: FolderContentsItem[];
+  truncated: boolean;
+}
+
+// Where a search result lives, relative to the folder being browsed ("in Projects / Alpha"),
+// linking to its containing folder. Nothing for matches directly in this folder.
+function SearchLocation({ item }: { item: FolderContentsItem }) {
+  if (!item.location || item.location.length === 0 || !item.parentFolderId) return null;
+  return (
+    <Link
+      href={`/folders/${item.parentFolderId}`}
+      className="block truncate text-xs text-muted-foreground hover:underline"
+      title={item.location.map((l) => l.name).join(" / ")}
+    >
+      in {item.location.map((l) => l.name).join(" / ")}
+    </Link>
+  );
 }
 
 interface CurrentFolder {
@@ -91,11 +115,12 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   const [tagsItem, setTagsItem] = React.useState<FolderContentsItem | null>(null);
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const [view, setView] = useViewPreference();
-  // Scoped to whatever's already loaded for this folder — filters the current listing client-side
-  // rather than hitting the backend, unlike the standalone /search page which searches everything
-  // the user can access regardless of location. Intentionally different: this is "find something
-  // in here", not "find something anywhere".
+  // "Find something in here": searches this folder AND everything below it, at any depth, on the
+  // server (GET /search?within=…). It used to filter only the already-loaded listing, so anything
+  // inside a subfolder could never be found. The standalone /search page is the "anywhere" search
+  // (including items shared with you).
   const [searchQuery, setSearchQuery] = React.useState("");
+  const [debouncedSearch, setDebouncedSearch] = React.useState("");
   const [typeFilter, setTypeFilter] = React.useState<
     "all" | "folder" | "image" | "video" | "audio" | "document"
   >("all");
@@ -122,7 +147,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
       item.type === "folder" ? `/folders/${item.id}` : `/files/${item.id}`,
       item.type === "folder" ? { parentFolderId: targetFolderId } : { folderId: targetFolderId },
     );
-    queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
+    refreshListing();
   }
 
   function onItemDragStart(e: React.DragEvent, item: FolderContentsItem) {
@@ -168,6 +193,33 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
       ),
   });
 
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 250);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  const searching = debouncedSearch.length > 0;
+  const searchScope = folderId ?? "mine";
+  const {
+    data: searchData,
+    isFetching: searchFetching,
+    error: searchError,
+  } = useQuery({
+    queryKey: ["search", "within", searchScope, debouncedSearch] as const,
+    queryFn: () =>
+      api.get<FolderSearchResponse>(
+        `/search?${new URLSearchParams({ q: debouncedSearch, within: searchScope }).toString()}`,
+      ),
+    enabled: searching,
+  });
+
+  // Refreshes both this folder's listing and any search results (which can come from subfolders)
+  // after an action changes something.
+  function refreshListing() {
+    queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
+    queryClient.invalidateQueries({ queryKey: ["search"] });
+  }
+
   // Navigating into a different folder while items were selected left the old selection's ids
   // "active" against a table that no longer contains them — the bulk toolbar would still show a
   // stale count and act on ids not present in the new listing (harmless since ids are globally
@@ -175,16 +227,18 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   React.useEffect(() => {
     setSelectedIds(new Set());
     setSearchQuery("");
+    setDebouncedSearch("");
   }, [folderId]);
 
   // Folders always sort ahead of files regardless of the chosen key (standard file-manager
   // convention — Explorer/Finder both do this) — only the ordering *within* each group follows
   // sortKey. Applied after the search/type filtering above, on whatever's left to show.
   const filteredItems = React.useMemo(() => {
-    if (!data) return [];
-    const q = searchQuery.trim().toLowerCase();
-    const matches = data.items.filter((item) => {
-      if (q && !item.name.toLowerCase().includes(q)) return false;
+    // While searching, the server's matches (from this folder and every subfolder) replace the
+    // listing; the type filter and sort below still apply to them.
+    const source = searching ? searchData?.items : data?.items;
+    if (!source) return [];
+    const matches = source.filter((item) => {
       if (typeFilter === "folder") return item.type === "folder";
       if (typeFilter !== "all") {
         // Images/Videos/Audio/Files are a breakdown of files only — folders never match a
@@ -215,7 +269,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
       }
     });
     return sorted;
-  }, [data, searchQuery, typeFilter, sortKey]);
+  }, [data, searchData, searching, typeFilter, sortKey]);
 
   // Bulk-fetched once rather than a per-row query (same N+1 concern the thumbnail component
   // above already accepts per-row for a different reason) — favorites list is small and this
@@ -237,7 +291,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
 
   async function deleteItem(item: FolderContentsItem) {
     await api.delete(item.type === "folder" ? `/folders/${item.id}` : `/files/${item.id}`);
-    queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
+    refreshListing();
   }
 
   async function downloadFile(item: FolderContentsItem) {
@@ -350,7 +404,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
   async function bulkDelete() {
     await Promise.all(selectedItems.map((item) => api.delete(item.type === "folder" ? `/folders/${item.id}` : `/files/${item.id}`)));
     setSelectedIds(new Set());
-    queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
+    refreshListing();
   }
 
   async function bulkDownload() {
@@ -424,7 +478,8 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
             <Input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search in this folder…"
+              placeholder={folderId ? "Search this folder…" : "Search My Files…"}
+              aria-label="Search this folder and its subfolders"
               className="h-8 w-40 pl-8 text-sm sm:w-52"
             />
           </div>
@@ -555,13 +610,29 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
           {error instanceof ApiError ? error.message : "Could not load this folder."}
         </p>
       )}
-      {data && data.items.length === 0 && <p className="text-sm text-muted-foreground">This folder is empty.</p>}
-      {data && data.items.length > 0 && filteredItems.length === 0 && (
-        <p className="text-sm text-muted-foreground">
-          {searchQuery.trim()
-            ? <>No files or folders match &quot;{searchQuery}&quot;.</>
-            : "Nothing matches the current filter."}
+      {searching && searchError && (
+        <p className="text-sm text-destructive">
+          {searchError instanceof ApiError ? searchError.message : "Search failed."}
         </p>
+      )}
+      {searching && searchFetching && !searchData && <p className="text-sm text-muted-foreground">Searching…</p>}
+      {searching && searchData && filteredItems.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          {searchData.items.length === 0 ? (
+            <>No files or folders match &quot;{debouncedSearch}&quot; in this folder or its subfolders.</>
+          ) : (
+            "No matches of the selected type."
+          )}
+        </p>
+      )}
+      {searching && searchData?.truncated && (
+        <p className="text-xs text-muted-foreground">Showing the first 100 matches. Refine your search to narrow it down.</p>
+      )}
+      {!searching && data && data.items.length === 0 && (
+        <p className="text-sm text-muted-foreground">This folder is empty.</p>
+      )}
+      {!searching && data && data.items.length > 0 && filteredItems.length === 0 && (
+        <p className="text-sm text-muted-foreground">Nothing matches the current filter.</p>
       )}
 
       {filteredItems.length > 0 && view === "list" && (
@@ -619,24 +690,31 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
                         ) : (
                           <FileText className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                         )}
-                        {item.type === "folder" ? (
-                          <>
-                            <Link href={`/folders/${item.id}`} className="font-medium hover:underline">
-                              {item.name}
-                            </Link>
-                            <span className="shrink-0 text-xs text-muted-foreground">
-                              {item.fileCount ?? 0} {item.fileCount === 1 ? "file" : "files"}
-                            </span>
-                          </>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => setPreviewItem(item)}
-                            className="font-medium hover:underline"
-                          >
-                            {item.name}
-                          </button>
-                        )}
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2.5">
+                            {item.type === "folder" ? (
+                              <>
+                                <Link href={`/folders/${item.id}`} className="font-medium hover:underline">
+                                  {item.name}
+                                </Link>
+                                {item.fileCount !== undefined && (
+                                  <span className="shrink-0 text-xs text-muted-foreground">
+                                    {item.fileCount} {item.fileCount === 1 ? "file" : "files"}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setPreviewItem(item)}
+                                className="text-left font-medium hover:underline"
+                              >
+                                {item.name}
+                              </button>
+                            )}
+                          </div>
+                          <SearchLocation item={item} />
+                        </div>
                         <button
                           type="button"
                           onClick={() => toggleFavorite(item)}
@@ -733,11 +811,12 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
 
               <div className="rounded-b-lg border-t border-border px-2.5 py-2 text-center">
                 <div className="truncate text-sm font-medium">{item.name}</div>
-                {item.type === "folder" && (
+                {item.type === "folder" && item.fileCount !== undefined && (
                   <div className="text-xs text-muted-foreground">
-                    {item.fileCount ?? 0} {item.fileCount === 1 ? "file" : "files"}
+                    {item.fileCount} {item.fileCount === 1 ? "file" : "files"}
                   </div>
                 )}
+                <SearchLocation item={item} />
               </div>
             </div>
             );
@@ -749,7 +828,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
         <NewFolderModal
           parentFolderId={folderId}
           onClose={() => setShowNewFolderModal(false)}
-          onCreated={() => queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) })}
+          onCreated={() => refreshListing()}
         />
       )}
 
@@ -776,7 +855,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
           itemId={renameItem.id}
           currentName={renameItem.name}
           onClose={() => setRenameItem(null)}
-          onRenamed={() => queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) })}
+          onRenamed={() => refreshListing()}
         />
       )}
 
@@ -787,7 +866,7 @@ export function FolderBrowser({ folderId }: { folderId: string | null }) {
           onClose={() => setMoveTargets(null)}
           onMoved={() => {
             setSelectedIds(new Set());
-            queryClient.invalidateQueries({ queryKey: queryKeys.folderContents(folderId) });
+            refreshListing();
           }}
         />
       )}

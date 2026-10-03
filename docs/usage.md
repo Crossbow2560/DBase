@@ -54,6 +54,7 @@ What viewers and editors can do:
 
 - **Favorites** (`/favorites`): star items for quick access.
 - **Tags** (`/tags`): create personal colored tags, apply them from an item's menu and browse by tag. Tags are private to you.
+- **Search box on My Files / a folder:** finds matches in that folder *and every subfolder*, showing where each nested match lives ("in Projects / Alpha", which links to that folder). The type filter, sort and row actions work on the results. Capped at 100 results.
 - **Search** (`/search`): partial, case-insensitive name search across everything you can open: your own items, items shared with you, and anything inside a folder shared with you. Results are capped at 50.
 
 ## Trash

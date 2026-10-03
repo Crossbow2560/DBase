@@ -177,6 +177,7 @@ A link stops working if it expires, if the item is trashed, or if its creator is
 | Method | Path | Auth | Response |
 |---|---|---|---|
 | GET | `/search?q=term` | 🔒 | `{ items }` (max 50): case-insensitive substring match on non-trashed items the user can open — owned, shared directly, or inside a shared folder |
+| GET | `/search?q=term&within=<folderId>\|mine` | 🔒 | `{ items, truncated }` (max 100): matches at any depth inside that folder (viewer access required), or inside My Files (`mine`: your root files and the full trees of your root folders). Each item adds `parentFolderId` and `location` (`[{ id, name }]`, the folders between the starting point and the item; `[]` when directly inside). `%` and `_` match literally. |
 
 ## Admin
 
