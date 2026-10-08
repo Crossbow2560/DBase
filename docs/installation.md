@@ -57,7 +57,7 @@ The root `.env` is the **only** config file. The backend, `docker-compose.yml`, 
 | `PUBLIC_APP_URL` | The frontend origin used in verification and password-reset email links |
 | `BACKEND_URL` | Only needed if the frontend and backend don't share this compose file. It is a build-time value, so you must rebuild the frontend image after changing it. |
 
-**Optional:** `COOKIE_SECURE` (defaults from `PUBLIC_APP_URL`'s scheme), `COOKIE_SECRET` (signs share-link unlock cookies; random per process if unset, so unlocks reset on restart), `TRUST_PROXY` (trusts loopback/private hops by default; see `.env.example`), `RATE_LIMIT_PER_IP_PER_MINUTE` (1200), `SESSION_TTL_DAYS` (30), `DEFAULT_USER_QUOTA_BYTES` (15 GiB), `PASSWORD_RESET_TTL_MINUTES` (30), `EMAIL_VERIFICATION_TTL_HOURS` (24), `UPLOAD_SESSION_TTL_MINUTES` (60), `TRASH_RETENTION_DAYS` (30), `RESEND_API_KEY`, `EMAIL_FROM`, `RESEND_WEBHOOK_SECRET`, `EMAIL_INBOUND_ADDRESS`.
+**Optional:** `COOKIE_SECURE` (defaults from `PUBLIC_APP_URL`'s scheme), `COOKIE_SECRET` (signs share-link unlock cookies; random per process if unset, so unlocks reset on restart), `TRUST_PROXY` (trusts loopback/private hops by default; see `.env.example`), `RATE_LIMIT_PER_IP_PER_MINUTE` (1200), `SESSION_TTL_DAYS` (30), `DEFAULT_USER_QUOTA_BYTES` (15 GiB; overridden once an admin sets a default in Storage Settings), `PASSWORD_RESET_TTL_MINUTES` (30), `EMAIL_VERIFICATION_TTL_HOURS` (24), `UPLOAD_SESSION_TTL_MINUTES` (60), `TRASH_RETENTION_DAYS` (30), `RESEND_API_KEY`, `EMAIL_FROM`, `RESEND_WEBHOOK_SECRET`, `EMAIL_INBOUND_ADDRESS`.
 
 ## 4. Apply the database schema
 

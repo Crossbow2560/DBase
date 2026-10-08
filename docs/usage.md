@@ -79,7 +79,7 @@ Admins see an extra sidebar section:
 | Users (`/admin/users`, `/admin/users/<id>`) | List users, change quota or role, deactivate or reactivate, delete (choosing who inherits their items), browse a user's files and storage breakdown |
 | Stats | System-wide usage and storage breakdown |
 | Activity | Audit log of uploads, shares, admin actions, backups and so on |
-| Storage Limit | Set the system-wide storage cap. User quotas are pre-allocated out of it, so the cap can't be set below the sum of verified users' quotas. |
+| Storage Settings | Set the system-wide storage cap. User quotas are pre-allocated out of it, so the cap can't be set below the sum of verified users' quotas. Also sets the default quota for new users: it applies only to accounts registered afterwards (existing quotas are unchanged) and can't exceed the cap. The page shows how many more accounts fit at that default. |
 | Backup | Copy the whole `dbase` bucket into a new `dbase-backup-<timestamp>` bucket, or restore one. A restore overwrites matching keys only and never deletes newer objects. Limited to 3 runs per 10 minutes. |
 | Failed jobs | Deletion-queue items that failed 5 times |
 | Send Mail / Received Mail | Send email through Resend, and read inbound mail delivered to `EMAIL_INBOUND_ADDRESS` |

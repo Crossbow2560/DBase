@@ -10,6 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
+import { VideoPlayer } from "@/components/files/video-player";
 
 interface PreviewResponse {
   available: boolean;
@@ -75,7 +76,7 @@ export function FilePreviewModal({
             <img src={data.url} alt={name} className="max-h-[70vh] max-w-full object-contain" />
           )}
           {data?.available && data.mimeType?.startsWith("video/") && (
-            <video src={data.url} controls autoPlay className="max-h-[70vh] max-w-full" />
+            <VideoPlayer src={data.url!} className="max-h-[70vh] max-w-full" />
           )}
           {data?.available && data.mimeType?.startsWith("audio/") && (
             <audio src={data.url} controls className="w-full max-w-md" />

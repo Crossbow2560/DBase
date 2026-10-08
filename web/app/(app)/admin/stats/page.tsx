@@ -292,6 +292,7 @@ const OPERATION_GROUPS: { key: string; label: string; actions: string[] }[] = [
       "view",
       "quota_change",
       "system_storage_limit_change",
+      "default_quota_change",
       "account_deactivate",
       "account_reactivate",
       "account_delete",

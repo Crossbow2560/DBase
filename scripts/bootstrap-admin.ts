@@ -15,7 +15,7 @@
 import "dotenv/config";
 import { db } from "../src/db.js";
 import { hashPassword, isPasswordStrongEnough } from "../src/lib/password.js";
-import { config } from "../src/config.js";
+import { getDefaultUserQuotaBytes } from "../src/modules/accounts/default-quota.js";
 
 function parseArgs() {
   const args = new Map<string, string>();
@@ -118,7 +118,7 @@ async function main() {
       password_hash: passwordHash,
       display_name: name,
       role: "admin",
-      storage_quota_bytes: config.defaultUserQuotaBytes,
+      storage_quota_bytes: await getDefaultUserQuotaBytes(),
       // Whoever runs this script already controls the deployment — there's no one to prove
       // the email to, and login() refuses unverified accounts. Verifying is also what allocates
       // the quota out of the system storage limit (supabase/migrations/0022).
@@ -139,7 +139,7 @@ main()
     if (err instanceof Error && err.message.includes("SYSTEM_STORAGE_ALLOCATION_EXCEEDED")) {
       console.error(
         "Not enough unallocated system storage for the admin's quota — raise " +
-          "system_settings.total_storage_limit_bytes or lower DEFAULT_USER_QUOTA_BYTES.",
+          "system_settings.total_storage_limit_bytes or lower the default quota for new users.",
       );
       process.exit(1);
     }

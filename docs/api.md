@@ -193,8 +193,9 @@ A link stops working if it expires, if the item is trashed, or if its creator is
 | POST | `/admin/users/:id/reactivate` | — | `204` |
 | DELETE | `/admin/users/:id` | `{ replacementOwnerId? }` | `204` |
 | GET | `/admin/stats` | — | System statistics |
-| GET | `/admin/system-storage` | — | System storage limit and allocation |
+| GET | `/admin/system-storage` | — | System storage limit, allocation and default quota for new users |
 | PATCH | `/admin/system-storage` | `{ totalStorageLimitBytes }` | `204` |
+| PATCH | `/admin/system-storage/default-quota` | `{ defaultUserQuotaBytes }` | `204`; applies to accounts registered afterwards; `400` above the system limit |
 | GET | `/admin/system-storage-breakdown` | — | `{ categories }` |
 | GET | `/admin/activity` | — | `{ entries }` (audit log) |
 | GET | `/admin/failed-jobs` | — | `{ jobs }` (failed deletion-queue rows) |

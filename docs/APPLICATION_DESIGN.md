@@ -403,8 +403,9 @@ Public routes pass the password as a **query parameter** (§13.5).
 | `GET /admin/users/:id/files` | | `?folderId=` browse a user's files. Logs `view`. |
 | `GET /admin/users/:id/storage-breakdown` | | Same shape as the user's own |
 | `GET /admin/stats` | | `{totalUsers, totalStorageUsedBytes}` |
-| `GET /admin/system-storage` | | `{totalStorageLimitBytes, totalStorageUsedBytes, totalStorageAllocatedBytes}` |
+| `GET /admin/system-storage` | | `{totalStorageLimitBytes, totalStorageUsedBytes, totalStorageAllocatedBytes, defaultUserQuotaBytes}` |
 | `PATCH /admin/system-storage` | write | `{totalStorageLimitBytes}` → 204. Cannot go below allocated quotas. |
+| `PATCH /admin/system-storage/default-quota` | write | `{defaultUserQuotaBytes}` → 204. Quota for accounts registered afterwards; cannot exceed the system limit. |
 | `GET /admin/system-storage-breakdown` | | System-wide category breakdown |
 | `GET /admin/activity` | | Latest **200** `{id,action,actorId,subjectUserId,createdAt}` |
 | `GET /admin/failed-jobs` | | Deletion-queue rows stuck in `failed` |
@@ -490,7 +491,7 @@ Three limits interact (DESIGN.md §9): per-user quota, per-user usage, and a sys
 
 - Quota may be set to 0 and lowered below usage. Raising it is bounded by unallocated system storage (`SYSTEM_STORAGE_ALLOCATION_EXCEEDED`, with the maximum available reported in GB).
 - The system limit may not fall below total allocated quotas (`STORAGE_LIMIT_BELOW_ALLOCATION`).
-- New registrations start with `DEFAULT_USER_QUOTA_BYTES` (15 GiB) and are refused when unallocated space cannot cover it.
+- New registrations start with the default quota (`system_settings.default_user_quota_bytes`, set by an admin; `DEFAULT_USER_QUOTA_BYTES`, 15 GiB, until one is set) and are refused when unallocated space cannot cover it.
 - The UI displays quotas in decimal gigabytes (×1e9) on admin pages, while defaults are binary GiB (15 × 1024³). Values round-trip approximately.
 
 ### 8.7 Public share links
@@ -592,7 +593,7 @@ Almost every page is a **client component**. The data is per-user and mutated in
 | `/admin/users/[userId]` | Browse a user's files (browse-only) | `/admin/users/:id/files` |
 | `/admin/stats` | System charts, per-user breakdown | `/admin/system-storage*`, `/admin/users`, `/admin/activity` |
 | `/admin/activity` | Activity table | `/admin/activity` |
-| `/admin/system-storage` | View and edit the system limit | `/admin/system-storage` |
+| `/admin/system-storage` | View and edit the system limit and the default quota for new users | `/admin/system-storage*` |
 | `/admin/backup` | Run backup, restore from a backup | `/admin/backup*` |
 | `/admin/send-mail`, `/admin/received-mail` | Compose mail; read inbound mail | `/admin/send-email`, `/admin/received-emails` |
 | `/admin/failed-jobs` | Failed deletion jobs | `/admin/failed-jobs` |
@@ -603,7 +604,7 @@ Almost every page is a **client component**. The data is per-user and mutated in
 
 - `app/layout.tsx`: fonts, an inline script that sets `data-theme` before hydration (avoids a theme flash), and `Providers` (TanStack `QueryClient` with `retry: 1`, `staleTime: 30 s`, then `AuthProvider`).
 - `(auth)/layout.tsx`: redirects **away** to `/home` if already signed in.
-- `(app)/layout.tsx`: redirects **to** `/login` if not signed in; renders the sidebar (Home, My Files, Shared with me, Favorites, Trash; Search, Tags, Devices, Account; and, for admins, Users, Stats, Activity, Storage Limit, Backup, Send Mail, Received Mail), a quota indicator, the sign-out button, the theme toggle, and the `UploadProvider` and `UploadTray`.
+- `(app)/layout.tsx`: redirects **to** `/login` if not signed in; renders the sidebar (Home, My Files, Shared with me, Favorites, Trash; Search, Tags, Devices, Account; and, for admins, Users, Stats, Activity, Storage Settings, Backup, Send Mail, Received Mail), a quota indicator, the sign-out button, the theme toggle, and the `UploadProvider` and `UploadTray`.
 - `admin/layout.tsx`: redirects non-admins to `/folders`.
 - **Both gates are client-side only.** There is no middleware or server-side session check, so a signed-in user may briefly see the login form (and vice versa) before `AuthProvider` resolves. This is a cosmetic flash, not a security gap: data access is enforced by the API's own 401s.
 
@@ -707,7 +708,7 @@ All configuration comes from one repository-root `.env`, read by the backend (`d
 | `PORT` / `FRONTEND_PORT` | 3000 / 3001 | Each drives both container port and published host port |
 | `SESSION_COOKIE_NAME` | `dbase_session` | |
 | `SESSION_TTL_DAYS` | 30 | Session lifetime |
-| `DEFAULT_USER_QUOTA_BYTES` | 16106127360 (15 GiB) | Quota for new accounts |
+| `DEFAULT_USER_QUOTA_BYTES` | 16106127360 (15 GiB) | Quota for new accounts until an admin sets one in Storage Settings |
 | `PASSWORD_RESET_TTL_MINUTES` | 30 | |
 | `EMAIL_VERIFICATION_TTL_HOURS` | 24 | |
 | `UPLOAD_SESSION_TTL_MINUTES` | 60 | Fixed upload-session lifetime |

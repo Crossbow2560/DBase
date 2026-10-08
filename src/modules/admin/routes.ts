@@ -132,6 +132,26 @@ export async function adminRoutes(app: FastifyInstance) {
     },
   );
 
+  app.patch(
+    "/api/v1/admin/system-storage/default-quota",
+    {
+      preHandler: requireAdmin,
+      ...writeHeavyRateLimit,
+      schema: {
+        body: {
+          type: "object",
+          required: ["defaultUserQuotaBytes"],
+          properties: { defaultUserQuotaBytes: { type: "integer" } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { defaultUserQuotaBytes } = request.body as { defaultUserQuotaBytes: number };
+      await admin.setDefaultUserQuota(request.session!.user_id, defaultUserQuotaBytes);
+      reply.code(204).send();
+    },
+  );
+
   app.post(
     "/api/v1/admin/send-email",
     {

@@ -124,7 +124,7 @@ Trashing sets `deleted_at`. Restoring clears it, as long as the item isn't alrea
 
 ## Database interaction
 
-- **DDL source of truth:** `supabase/migrations/0001…0022.sql`, applied by `scripts/migrate.ts`, which records each applied file in `_migrations`. `prisma/schema.prisma` is used only to generate a typed client. `prisma migrate` and `db push` must never be run.
+- **DDL source of truth:** `supabase/migrations/0001…0026.sql`, applied by `scripts/migrate.ts`, which records each applied file in `_migrations`. `prisma/schema.prisma` is used only to generate a typed client. `prisma migrate` and `db push` must never be run.
 - **Constraints the database enforces:**
   - Per-user quota: a `CHECK` plus a trigger.
   - System storage limit and pre-allocation (`0015`, `0022`).

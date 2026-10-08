@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { formatBytes, formatDate } from "@/lib/format";
 import { fileCategory } from "@/lib/file-category";
 import { Button } from "@/components/ui/button";
+import { VideoPlayer } from "@/components/files/video-player";
 import { Input } from "@/components/ui/input";
 import { SelectMenu } from "@/components/ui/select-menu";
 import { RowActionsMenu, type RowAction } from "@/components/files/row-actions-menu";
@@ -125,7 +126,7 @@ function PublicFilePreviewModal({
             <img src={data.url} alt={name} className="max-h-[70vh] max-w-full object-contain" />
           )}
           {data?.available && data.mimeType?.startsWith("video/") && (
-            <video src={data.url} controls autoPlay className="max-h-[70vh] max-w-full" />
+            <VideoPlayer src={data.url!} className="max-h-[70vh] max-w-full" />
           )}
           {data?.available && data.mimeType?.startsWith("audio/") && (
             <audio src={data.url} controls className="w-full max-w-md" />

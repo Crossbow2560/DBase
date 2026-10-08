@@ -204,7 +204,7 @@ One row per account.
 
 **Lifecycle notes**
 
-- Registration inserts the row with `email_verified = false` and the default quota from `DEFAULT_USER_QUOTA_BYTES`. The preallocation trigger can reject the insert once the system is fully allocated, which the API surfaces as `REGISTRATION_CLOSED`.
+- Registration inserts the row with `email_verified = false` and the default quota (`system_settings.default_user_quota_bytes`, falling back to `DEFAULT_USER_QUOTA_BYTES` while that is null). The preallocation trigger can reject the insert once the system is fully allocated, which the API surfaces as `REGISTRATION_CLOSED`.
 - A re-registration against an existing **unverified** email overwrites that row's password hash and display name. This lets a mistyped signup be redone without an orphaned, unreachable row.
 - Deletion is a hard `DELETE` performed only through `delete_account()` (§6.7). It cascades to `sessions`, `permissions` (as grantee), `share_links`, `favorites`, `tags` and `item_tags`, `upload_sessions`, `password_reset_tokens`, `email_verification_tokens`, and `effective_permissions`. `deletion_queue.owner_id` is set to null.
 
@@ -890,7 +890,11 @@ Applied in filename order by `scripts/migrate.ts` on every deploy (a no-op once 
 | 0019 | activity_action_backup_restore | enum value |
 | 0020 | received_emails | inbound mail table |
 | 0021 | received_email_attachments | `received_emails.attachments` |
-| 0022 | preallocate_user_quotas | quota pre-allocation and limit-covers-allocation triggers (**uncommitted**) |
+| 0022 | preallocate_user_quotas | quota pre-allocation and limit-covers-allocation triggers |
+| 0023 | folder_scoped_sibling_names | unique live names per folder rather than per owner |
+| 0024 | hash_share_link_tokens | `share_links.token` → `token_hash` (SHA-256) |
+| 0025 | upload_part_functions | `record_upload_part()` / `release_upload_part()` |
+| 0026 | default_user_quota_setting | `system_settings.default_user_quota_bytes`; `default_quota_change` enum value |
 
 Adding an enum value uses `alter type … add value`, which cannot be removed later.
 
@@ -909,7 +913,7 @@ Adding an enum value uses `alter type … add value`, which cannot be removed la
 | `upload_session_status` | `pending`, `complete`, `aborted` |
 | `deletion_queue_status` | `pending`, `processing`, `done`, `failed` |
 | `thumbnail_queue_status` | `pending`, `processing`, `done`, `failed` |
-| `activity_action` | `upload`, `download`, `rename`, `move`, `delete`, `restore`, `purge`, `share`, `unshare`, `create_share_link`, `revoke_share_link`, `favorite`, `unfavorite`, `tag`, `untag`, `quota_change`, `permission_change`, `ownership_transfer`, `view`, `account_deactivate`, `account_reactivate`, `account_delete`, `system_storage_limit_change`, `backup_run`, `backup_restore` |
+| `activity_action` | `upload`, `download`, `rename`, `move`, `delete`, `restore`, `purge`, `share`, `unshare`, `create_share_link`, `revoke_share_link`, `favorite`, `unfavorite`, `tag`, `untag`, `quota_change`, `permission_change`, `ownership_transfer`, `view`, `account_deactivate`, `account_reactivate`, `account_delete`, `system_storage_limit_change`, `default_quota_change`, `backup_run`, `backup_restore` |
 
 `activity_action` is a closed set. A new user-facing action must extend the enum rather than hide in `metadata`.
 

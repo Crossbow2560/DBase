@@ -6,7 +6,7 @@ type ActivityAction =
   | "upload" | "download" | "rename" | "move" | "delete" | "restore" | "purge"
   | "share" | "unshare" | "create_share_link" | "revoke_share_link"
   | "favorite" | "unfavorite" | "tag" | "untag"
-  | "quota_change" | "system_storage_limit_change" | "permission_change" | "ownership_transfer"
+  | "quota_change" | "system_storage_limit_change" | "default_quota_change" | "permission_change" | "ownership_transfer"
   | "backup_run" | "backup_restore"
   | "view"
   | "account_deactivate" | "account_reactivate" | "account_delete";

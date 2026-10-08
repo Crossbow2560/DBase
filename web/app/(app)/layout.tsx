@@ -90,7 +90,7 @@ const ADMIN_LINKS: { href: string; label: string; icon: LucideIcon }[] = [
   { href: "/admin/users", label: "Users", icon: UserCog },
   { href: "/admin/stats", label: "Stats", icon: BarChart3 },
   { href: "/admin/activity", label: "Activity", icon: History },
-  { href: "/admin/system-storage", label: "Storage Limit", icon: HardDrive },
+  { href: "/admin/system-storage", label: "Storage Settings", icon: HardDrive },
   { href: "/admin/backup", label: "Backup", icon: DatabaseBackup },
   { href: "/admin/send-mail", label: "Send Mail", icon: Mail },
   { href: "/admin/received-mail", label: "Received Mail", icon: Inbox },

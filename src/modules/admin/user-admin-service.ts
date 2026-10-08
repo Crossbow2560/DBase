@@ -1,9 +1,12 @@
 import { db } from "../../db.js";
+import { config } from "../../config.js";
 import {
   userNotFound,
   invalidQuota,
   lastAdminStanding,
   invalidStorageLimit,
+  invalidDefaultQuota,
+  defaultQuotaExceedsLimit,
   quotaExceedsUnallocated,
   storageLimitBelowAllocation,
 } from "./errors.js";
@@ -135,6 +138,8 @@ export async function getSystemStorageSettings() {
     // what actually decides whether a new account can register or a quota can be raised.
     // Unverified sign-ups don't hold an allocation until they verify.
     totalStorageAllocatedBytes: Number(allocation._sum.storage_quota_bytes ?? 0n),
+    // What a newly registered account starts with (0026). Existing accounts keep their quota.
+    defaultUserQuotaBytes: Number(settings.default_user_quota_bytes ?? config.defaultUserQuotaBytes),
   };
 }
 
@@ -174,6 +179,33 @@ export async function setSystemStorageLimit(adminId: string, limitBytes: number)
     metadata: {
       previousLimitBytes: previous.total_storage_limit_bytes.toString(),
       newLimitBytes: limitBytes.toString(),
+    },
+  });
+}
+
+/**
+ * The quota new accounts are created with (supabase/migrations/0026_default_user_quota_setting.sql).
+ * Only affects accounts registered from now on — existing quotas are left alone; an admin changes
+ * those per user. Can't exceed the system limit, since no account with that quota could ever be
+ * allocated (0022). Lowering the system limit below it later is still allowed — registration then
+ * just closes, the same as when the system fills up.
+ */
+export async function setDefaultUserQuota(adminId: string, quotaBytes: number): Promise<void> {
+  if (!Number.isInteger(quotaBytes) || quotaBytes < 0) throw invalidDefaultQuota();
+
+  const previous = await db.system_settings.findUniqueOrThrow({ where: { id: true } });
+  if (BigInt(quotaBytes) > previous.total_storage_limit_bytes) {
+    throw defaultQuotaExceedsLimit(previous.total_storage_limit_bytes);
+  }
+  await db.system_settings.update({ where: { id: true }, data: { default_user_quota_bytes: BigInt(quotaBytes) } });
+
+  await logActivity({
+    actorId: adminId,
+    subjectUserId: null,
+    action: "default_quota_change",
+    metadata: {
+      previousDefaultQuotaBytes: (previous.default_user_quota_bytes ?? config.defaultUserQuotaBytes).toString(),
+      newDefaultQuotaBytes: quotaBytes.toString(),
     },
   });
 }

@@ -11,6 +11,16 @@ export const lastAdminStanding = () =>
 export const invalidStorageLimit = () =>
   new AppError(400, "VALIDATION_ERROR", "Storage limit must be a non-negative integer number of bytes.");
 
+export const invalidDefaultQuota = () =>
+  new AppError(400, "VALIDATION_ERROR", "Default quota must be a non-negative integer number of bytes.");
+
+export const defaultQuotaExceedsLimit = (limitBytes: bigint) =>
+  new AppError(
+    400,
+    "VALIDATION_ERROR",
+    `The default quota can't be larger than the ${formatGb(limitBytes)} GB system storage limit.`,
+  );
+
 export const backupNotFound = () =>
   new AppError(404, "NOT_FOUND", "That backup no longer exists — it may have been deleted directly in MinIO.");
 

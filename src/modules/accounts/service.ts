@@ -5,6 +5,7 @@ import { hashPassword, verifyPassword, isPasswordStrongEnough } from "../../lib/
 import { generateToken, hashToken } from "../../lib/tokens.js";
 import { sendEmail } from "../../lib/email.js";
 import { renderEmailLayout } from "../../lib/emailTemplate.js";
+import { getDefaultUserQuotaBytes } from "./default-quota.js";
 import {
   registrationFailed,
   invalidCredentials,
@@ -61,7 +62,10 @@ export async function register(input: {
     throw weakPassword();
   }
 
-  const passwordHash = await hashPassword(input.password);
+  const [passwordHash, defaultQuotaBytes] = await Promise.all([
+    hashPassword(input.password),
+    getDefaultUserQuotaBytes(),
+  ]);
 
   let user;
   try {
@@ -70,7 +74,7 @@ export async function register(input: {
         email: input.email,
         password_hash: passwordHash,
         display_name: input.displayName,
-        storage_quota_bytes: config.defaultUserQuotaBytes,
+        storage_quota_bytes: defaultQuotaBytes,
         // role is never accepted from the client — admin is never self-grantable
         // (REQUIREMENTS.md §5.1). The column default ('user') applies. email_verified's column
         // default (false) applies too — verification-blocks-login is the point of this feature.
