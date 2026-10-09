@@ -70,6 +70,32 @@ What viewers and editors can do:
 - An upload that would exceed your quota is rejected with `QUOTA_EXCEEDED` partway through, when the excess would occur. Bytes already uploaded for that file are credited back when it's canceled or expires.
 - `SYSTEM_STORAGE_LIMIT_EXCEEDED` means the whole system is full, not your account. Contact an admin.
 
+## Desktop sync (`dbase-sync`)
+
+`dbase-sync` keeps folders on your computer in sync with folders in DBase, in both directions. It runs on Linux and Windows and needs Node.js 22.13 or later.
+
+```bash
+cd sync-cli && npm install && npm run build && npm link
+dbase-sync login --server https://dbase.example.com
+dbase-sync add ~/DBase "Sync"
+dbase-sync run
+```
+
+`add` takes a path in My Files (created if it doesn't exist) or a folder id, which is how you sync a folder shared with you; the id is in the folder's web URL. If you only have view access, the folder syncs down only. Run `dbase-sync --help` for every command.
+
+`run` syncs every folder you've added: right away when something changes locally, and at least every 15 seconds for changes in DBase. Leave it running (for example as a systemd user service, or a Windows scheduled task at logon), or use `run --once`.
+
+How it behaves:
+
+- **Edits** go both ways, replacing the file in DBase in place, so its shares, tags and links are kept.
+- **If a file changed on both sides**, you get both versions. DBase's version keeps the name and yours becomes `name (conflicted copy <computer> <date>).ext`, which is then synced like any file.
+- **Deleting a file on your computer doesn't delete it in DBase.** It stays deleted on this computer unless someone edits it in DBase. `dbase-sync restore <path>` brings it back.
+- **Deleting (trashing) a file in DBase doesn't delete your copy.** The copy is kept and marked *detached*, so it's no longer synced and your edits to it aren't uploaded. If it's restored in DBase, it's linked up again. `dbase-sync reattach <path>` uploads it as a new file.
+- **Renames and moves** carry over on both sides.
+- **Skipped:** names your system can't store (on Windows: `<>:"/\|?*`, names like `CON`, a trailing dot or space, two names differing only by case), symbolic links, and temp and system files. Add your own patterns in a `.dbaseignore` file in the synced folder (gitignore style).
+- `dbase-sync status` shows each folder's state. `dbase-sync conflicts` lists conflicts, detached edits, skipped names and errors.
+- Signing in creates a **device token**. Revoke it from another login with `DELETE /auth/device-tokens/:id`, or run `dbase-sync logout` on the device. Changing your password signs out every device.
+
 ## Admin panel
 
 Admins see an extra sidebar section:

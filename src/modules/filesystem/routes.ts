@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { AppError } from "../accounts/errors.js";
 import * as folders from "./folder-service.js";
 import * as files from "./file-service.js";
+import { contentVersion } from "./content-version.js";
 import * as uploads from "./upload-service.js";
 import { createFolderTree, MAX_TREE_FOLDERS } from "./folder-tree-service.js";
 import * as thumbnails from "../thumbnails/thumbnail-service.js";
@@ -186,21 +187,37 @@ export async function filesystemRoutes(app: FastifyInstance) {
       schema: {
         body: {
           type: "object",
-          required: ["targetName", "totalParts"],
+          required: ["totalParts"],
           properties: {
             targetFolderId: { type: ["string", "null"] },
             targetName: { type: "string" },
             totalParts: { type: "integer", minimum: 1 },
+            // Replace an existing file's content (sync clients); targetName/targetFolderId are
+            // then ignored. expectedVersion makes it a compare-and-swap.
+            replaceFileId: { type: "string", format: "uuid" },
+            expectedVersion: { type: "string", pattern: "^[0-9a-f]{32}$" },
+            checksum: { type: "string", pattern: "^[0-9a-f]{64}$" },
           },
+          anyOf: [{ required: ["targetName"] }, { required: ["replaceFileId"] }],
         },
       },
     },
     async (request, reply) => {
-      const body = request.body as { targetFolderId?: string | null; targetName: string; totalParts: number };
+      const body = request.body as {
+        targetFolderId?: string | null;
+        targetName?: string;
+        totalParts: number;
+        replaceFileId?: string;
+        expectedVersion?: string;
+        checksum?: string;
+      };
       const result = await uploads.initUploadSession(request.session!.user_id, {
         targetFolderId: body.targetFolderId ?? null,
-        targetName: body.targetName,
+        targetName: body.targetName ?? "",
         totalParts: body.totalParts,
+        replaceFileId: body.replaceFileId,
+        expectedVersion: body.expectedVersion,
+        checksum: body.checksum,
       });
       reply.code(201).send(result);
     },
@@ -241,8 +258,9 @@ export async function filesystemRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { id } = request.params as { id: string };
       const body = (request.body ?? {}) as { mimeType?: string };
-      const file = await uploads.completeUpload(request.session!.user_id, id, body.mimeType ?? "application/octet-stream");
-      reply.send({ file: files.serializeFile(file) });
+      const file = await uploads.completeUpload(request.session!.user_id, id, body.mimeType);
+      // `version` lets a sync client record what it just uploaded (content-version.ts).
+      reply.send({ file: { ...files.serializeFile(file), version: contentVersion(file.storage_key) } });
     },
   );
 

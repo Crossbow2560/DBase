@@ -30,20 +30,21 @@ Postgres is external (Supabase). The stack does not run its own database.
 
 ## Backend components
 
-`src/app.ts#buildApp()` builds the Fastify instance; `src/server.ts` calls it, starts listening and starts the three workers. The integration tests use `buildApp()` directly with `app.inject()`. `buildApp()`:
+`src/app.ts#buildApp()` builds the Fastify instance; `src/server.ts` calls it, starts listening and starts the four workers. The integration tests use `buildApp()` directly with `app.inject()`. `buildApp()`:
 
 1. Configures logging with a request serializer that masks share-link tokens and drops query strings, and sets `trustProxy` (`TRUST_PROXY`, default: loopback/private hops) so `request.ip` is the real client behind the Next.js proxy.
-2. Registers the cookie plugin (with `COOKIE_SECRET` for signed share-unlock cookies) and the rate-limit plugin: 300 req/min keyed by a SHA-256 of the session cookie (or IP), per-route overrides, plus a per-IP ceiling (`RATE_LIMIT_PER_IP_PER_MINUTE`) built on `createRateLimit()` so made-up cookies can't dodge limits.
+2. Registers the cookie plugin (with `COOKIE_SECRET` for signed share-unlock cookies) and the rate-limit plugin: 300 req/min keyed by a SHA-256 of the device token or session cookie (or IP), per-route overrides, plus a per-IP ceiling (`RATE_LIMIT_PER_IP_PER_MINUTE`) built on `createRateLimit()` so made-up cookies can't dodge limits.
 3. Adds a raw `application/octet-stream` body parser for upload parts, with `bodyLimit` raised to 10 MB.
 4. Installs a single error handler that maps `AppError` → `{ error: { code, message } }`, schema-validation errors → `400 VALIDATION_ERROR`, and anything else → `500 INTERNAL_ERROR`.
-5. Registers each module's route plugin. Route guards (`requireSession`, `requireAdmin`) and the shared rate-limit presets live in `modules/accounts/guards.ts`.
+5. Registers each module's route plugin. Route guards (`requireSession`, `requireCookieSession`, `requireAdmin`) and the shared rate-limit presets live in `modules/accounts/guards.ts`.
 
 ### Domain modules (`src/modules/*`)
 
 | Module | Responsibility |
 |---|---|
-| `accounts` | Register, email verification, login/logout, sessions, password change/reset, profile, storage usage |
-| `filesystem` | Folders (create, rename, move, trash, list, zip), files (rename, move, trash, download/preview URLs), chunked uploads |
+| `accounts` | Register, email verification, login/logout, sessions, device tokens, password change/reset, profile, storage usage |
+| `filesystem` | Folders (create, rename, move, trash, list, zip), files (rename, move, trash, download/preview URLs), chunked uploads and content replace |
+| `sync` | The sync API: subtree snapshots, the change feed, batched download URLs and moves (see [Folder sync](#folder-sync)) |
 | `access` | `checkPermission()` / `resolveEffectiveRole()`, permission grants, ownership transfer, share links (authenticated and public) |
 | `trash` | Trash listing, restore, "delete forever", deletion-queue processing |
 | `organize` | Favorites and per-user colored tags |
@@ -71,6 +72,8 @@ All workers use `setInterval` with an in-memory "tick in progress" flag so ticks
 | `deletion-queue` (drain) | 1 min | Claim pending `deletion_queue` rows (`FOR UPDATE SKIP LOCKED`), delete the objects, retry up to 5 times, then mark `failed` |
 | `deletion-queue` (scan) | 1 h | Enqueue trashed items older than `TRASH_RETENTION_DAYS` (30) |
 | `thumbnail-queue` | 30 s | Claim pending `thumbnail_queue` rows, generate a 320px JPEG, retry up to 3 times |
+| `sync-events` (sequence) | 10 s | Assign `seq` to committed `sync_events` rows (`sequence_sync_events()`), so reads find little left to do |
+| `sync-events` (prune) | 1 h | Delete events older than `SYNC_EVENT_RETENTION_DAYS` (60) and record how far the log was pruned |
 
 ## Key flows
 
@@ -80,6 +83,7 @@ All workers use `setInterval` with an in-memory "tick in progress" flag so ticks
 2. `POST /auth/verify-email` flips `email_verified`. A DB trigger (migration `0022`) allocates the user's quota out of the system storage limit at this point.
 3. `POST /auth/login` checks the bcrypt hash, then `is_active`, then `email_verified`, in that order, so a wrong password looks identical either way. It creates a `sessions` row and sets the `dbase_session` httpOnly, `SameSite=Lax` cookie (`Secure` when `PUBLIC_APP_URL` is https, or per `COOKIE_SECURE`).
 4. Every protected route runs `requireSession` as a `preHandler`. It hashes the cookie, loads the session and its user, and rejects the request if the session is revoked or expired or the user is deactivated.
+5. Non-browser clients send `Authorization: Bearer dbt_…` instead. `requireSession` resolves the device token (`device_tokens`, `0027`) the same way and sets the same `request.session`, so every route accepts either credential. Credential-management routes use `requireCookieSession`, which refuses device tokens.
 
 ### Chunked upload
 
@@ -121,6 +125,33 @@ The backend never streams single files. `GET /files/:id/download|preview|thumbna
 ### Trash and deletion
 
 Trashing sets `deleted_at`. Restoring clears it, as long as the item isn't already mid-purge. "Delete forever" and the 30-day scan both enqueue into `deletion_queue`, which the drain worker processes asynchronously, removing objects and crediting quota. Rows that keep failing show up in the admin "Failed jobs" page.
+
+A content replace also enqueues its old object, as a `blob_only` row: the worker deletes the object and thumbnail but leaves the `files` row alone. Quota was already settled in the replace transaction. These rows get a fresh random `item_id`, so the "is this item already being purged?" checks never mistake them for the file.
+
+### Folder sync
+
+The `dbase-sync` CLI (`sync-cli/`, a separate npm package like `web/`) keeps local folders in step with DBase folders through the `/sync/*` API.
+
+**Change feed (`0028`).** Triggers on `files` and `folders` write one `sync_events` row per create, content update, move or rename, trash, restore and purge. Purges count too: rows are hard-deleted, so the event is the only trace left. Each event records the parent folder's `materialized_path` before and after, and a root's subtree is every event whose path contains `/<root id>/`. A folder move writes one event; the descendant path rewrites write none.
+
+**Ordering.** A sequence value taken at insert time can commit out of order. Transaction A takes seq 5, B takes 6 and commits first, a client reads up to 6, and then 5 appears behind its cursor. So events are inserted with `seq = NULL`. `sequence_sync_events()`, serialized by an advisory lock, numbers only already-committed rows. Anything that commits later is numbered later, so a cursor never skips an event. `/sync/changes` and `/sync/tree` run the sequencer before reading, and the `sync-events` worker runs it every 10 s. The tree takes its cursor *before* it reads items, so a change made while a client pages through the tree is replayed from the feed rather than lost.
+
+**Content versions.** `version = sha256(storage_key)[:32]`. `storage_key` is fresh on every upload and replace and never otherwise changes, so the version changes exactly when the content does, without exposing the key. Sync clients compare it to detect remote edits, and send it as `expectedVersion` when replacing content.
+
+**Client loop** (`sync-cli/src/engine.ts`), per root, per pass:
+
+1. **Pull:** apply `/sync/changes` to a local SQLite mirror of the remote subtree, or rebuild it from `/sync/tree` on the first run or a `410`.
+2. **Scan:** stat the whole local tree. Hash a file only when its size or mtime differs from the last-synced base.
+3. **Moves by id:** an item that moved in DBase is renamed locally to follow it. A local move is carried over with `/sync/batch`: a file is matched by content hash, a folder by its child names.
+4. **Decide each path** from local, remote and base (`reconcile.ts`, a pure table with full unit coverage):
+   - Deletes never propagate: a local delete marks the path `local_removed`, and a remote trash marks the local copy `detached`.
+   - An edit beats a delete.
+   - When both sides changed, both versions are kept, as a `(conflicted copy <host> <date>)` file.
+5. **Transfer:**
+   - Downloads come from batched presigned URLs, are written to a temp file and checked against `checksum`, then renamed into place.
+   - Uploads are resumable sessions. An edit is a compare-and-swap replace on the base version.
+
+A watcher (`fs.watch`, recursive) triggers an early pass; a pass also runs every 15 s.
 
 ## Database interaction
 

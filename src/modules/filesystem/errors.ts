@@ -66,3 +66,8 @@ export const invalidFolderTree = (message: string) => new AppError(400, "VALIDAT
 
 export const noLongerAvailable = () =>
   new AppError(404, "NO_LONGER_AVAILABLE", "This file is no longer available.");
+
+// Replacing a file's content (upload-service.ts completeReplace): the file changed (or was
+// trashed) since the client last saw it, so its upload would overwrite an edit it never saw.
+export const contentConflict = () =>
+  new AppError(409, "CONTENT_CONFLICT", "The file changed or was deleted since you last synced it.");

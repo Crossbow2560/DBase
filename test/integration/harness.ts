@@ -170,14 +170,30 @@ export async function createUserAndLogin(env: TestEnv, opts: Parameters<typeof c
   return { user, cookie };
 }
 
-/** JSON request helper — inject() with an optional session cookie. */
+/**
+ * Request headers for a credential: a device token ("dbt_…", sent as a bearer token) or a
+ * session Cookie header value.
+ */
+export function authHeaders(auth?: string): Record<string, string> {
+  if (!auth) return {};
+  return auth.startsWith("dbt_") ? { authorization: `Bearer ${auth}` } : { cookie: auth };
+}
+
+/** Mints a device token through the real endpoint, from a cookie login. */
+export async function createDeviceToken(env: TestEnv, cookie: string, name = "test device"): Promise<{ id: string; token: string }> {
+  const res = await api(env, cookie).post("/auth/device-tokens", { name });
+  if (res.statusCode !== 201) throw new Error(`device token failed: ${res.statusCode} ${res.body}`);
+  return (res.json() as { deviceToken: { id: string; token: string } }).deviceToken;
+}
+
+/** JSON request helper — inject() with an optional session cookie or device token. */
 export function api(env: TestEnv, cookie?: string) {
   const call = (method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE") =>
     (url: string, payload?: unknown): Promise<LightMyRequestResponse> =>
       env.app.inject({
         method,
         url: `/api/v1${url}`,
-        headers: cookie ? { cookie } : {},
+        headers: authHeaders(cookie),
         ...(payload !== undefined ? { payload: payload as object } : {}),
       });
   return { get: call("GET"), post: call("POST"), put: call("PUT"), patch: call("PATCH"), delete: call("DELETE") };
@@ -187,7 +203,7 @@ export function putPart(env: TestEnv, cookie: string, sessionId: string, partNum
   return env.app.inject({
     method: "PUT",
     url: `/api/v1/files/upload-sessions/${sessionId}/parts/${partNumber}`,
-    headers: { cookie, "content-type": "application/octet-stream" },
+    headers: { ...authHeaders(cookie), "content-type": "application/octet-stream" },
     payload: data,
   });
 }

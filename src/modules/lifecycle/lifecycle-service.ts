@@ -1,6 +1,7 @@
 import { db } from "../../db.js";
 import { logActivity } from "../admin/audit-service.js";
 import { userNotFound, lastAdminStanding, noSystemAdmin } from "./errors.js";
+import { revokeAllDeviceTokens } from "../accounts/device-token-service.js";
 
 function isLastAdminError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("LAST_ADMIN");
@@ -31,6 +32,9 @@ export async function deactivateAccount(adminId: string, targetUserId: string): 
     where: { user_id: targetUserId, revoked_at: null },
     data: { revoked_at: new Date() },
   });
+  // Not strictly needed (resolveDeviceToken also rejects inactive users), but reactivation must
+  // not silently bring old devices back — the user signs them in again.
+  await revokeAllDeviceTokens(targetUserId);
 
   await logActivity({
     actorId: adminId,

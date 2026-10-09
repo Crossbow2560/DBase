@@ -51,6 +51,7 @@ model users {
   updated_at          DateTime  @default(now()) @db.Timestamptz(6)
 
   sessions                 sessions[]
+  device_tokens            device_tokens[]
   password_reset_tokens    password_reset_tokens[]
   email_verification_tokens email_verification_tokens[]
   owned_folders         folders[]        @relation("folder_owner")
@@ -150,6 +151,9 @@ model upload_sessions {
   status           upload_session_status @default(pending)
   expires_at       DateTime              @db.Timestamptz(6)
   created_at       DateTime              @default(now()) @db.Timestamptz(6)
+  replace_file_id   String?              @db.Uuid
+  expected_version  String?
+  checksum          String?
 
   file          files?                @relation(fields: [file_id], references: [id])
   user          users                 @relation(fields: [user_id], references: [id])
@@ -168,6 +172,20 @@ model upload_session_parts {
   upload_session upload_sessions @relation(fields: [upload_session_id], references: [id], onDelete: Cascade)
 
   @@id([upload_session_id, part_number])
+}
+
+model device_tokens {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  user_id      String    @db.Uuid
+  token_hash   String    @unique
+  name         String
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  last_used_at DateTime? @db.Timestamptz(6)
+  revoked_at   DateTime? @db.Timestamptz(6)
+
+  user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id], map: "idx_device_tokens_user_id")
 }
 
 model sessions {
@@ -373,6 +391,7 @@ model deletion_queue {
   attempts      Int                  @default(0)
   enqueued_at   DateTime             @default(now()) @db.Timestamptz(6)
   processed_at  DateTime?            @db.Timestamptz(6)
+  blob_only     Boolean              @default(false)
 
   @@index([status])
 }
@@ -422,4 +441,12 @@ model email_verification_tokens {
   user users @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id])
+}
+
+// supabase/migrations/0028. sync_events is read with raw SQL (modules/sync/service.ts); only the
+// singleton bookkeeping row is modeled.
+model sync_state {
+  id                 Boolean @id @default(true)
+  last_seq           BigInt  @default(0)
+  pruned_through_seq BigInt  @default(0)
 }

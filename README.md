@@ -19,7 +19,7 @@ The original design documents are kept alongside these: [REQUIREMENTS.md](docs/R
 
 DBase is a self-hosted file storage and sharing app, similar to a small Google Drive.
 
-- **What it does:** users upload files into nested folders and share them with other users (viewer/editor roles, inherited through folders) or through public links that can have a password and an expiry. It also covers favorites, tags, search, trash with 30-day retention, thumbnails and inline previews, and zip downloads of folders.
+- **What it does:** users upload files into nested folders and share them with other users (viewer/editor roles, inherited through folders) or through public links that can have a password and an expiry. It also covers favorites, tags, search, trash with 30-day retention, thumbnails and inline previews, and zip downloads of folders. A command-line client, `dbase-sync` (`sync-cli/`), keeps local folders in two-way sync with DBase on Linux and Windows.
 - **What problem it solves:** it gives you a private, multi-user file store on your own hardware. File bytes stay in your own MinIO instance, metadata lives in Postgres, and per-user and system-wide storage quotas are enforced by the database.
 - **Real use case:** a single Ubuntu host runs the whole stack with Docker Compose. A GitHub Actions self-hosted runner redeploys it on every push to `main`. An admin manages users, quotas, the system storage limit, MinIO backups and restores, the audit log and outbound/inbound email from the admin panel.
 

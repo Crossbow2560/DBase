@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { startUploadSessionCleanupWorker } from "./workers/upload-session-cleanup.js";
 import { startDeletionQueueWorker } from "./workers/deletion-queue.js";
 import { startThumbnailQueueWorker } from "./workers/thumbnail-queue.js";
+import { startSyncEventsWorker } from "./workers/sync-events.js";
 
 const app = await buildApp();
 
@@ -19,3 +20,4 @@ app.log.info("Single-instance mode: in-memory rate limits and background workers
 startUploadSessionCleanupWorker();
 startDeletionQueueWorker();
 startThumbnailQueueWorker();
+startSyncEventsWorker();

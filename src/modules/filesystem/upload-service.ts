@@ -5,6 +5,7 @@ import { db } from "../../db.js";
 import { config } from "../../config.js";
 import * as storage from "../storage/client.js";
 import { normalizeName, assertPathLengthOk } from "./normalize.js";
+import { contentVersion } from "./content-version.js";
 import {
   nameCollision,
   folderNotFound,
@@ -17,6 +18,8 @@ import {
   partTooLarge,
   uploadIncomplete,
   uploadCompleting,
+  fileNotFound,
+  contentConflict,
 } from "./errors.js";
 import { checkPermission } from "../access/permission-check.js";
 import { createOwnerPermission } from "../access/permission-service.js";
@@ -27,8 +30,20 @@ const POSTGRES_UNIQUE_VIOLATION = "P2002";
 
 export async function initUploadSession(
   userId: string,
-  input: { targetFolderId: string | null; targetName: string; totalParts: number },
+  input: {
+    targetFolderId: string | null;
+    targetName: string;
+    totalParts: number;
+    /** Replace this file's content instead of creating a new file (supabase/migrations/0029). */
+    replaceFileId?: string;
+    /** Compare-and-swap for a replace: the file's content version the client last saw. */
+    expectedVersion?: string;
+    /** The client's SHA-256 of the whole upload, stored as files.checksum. */
+    checksum?: string;
+  },
 ) {
+  if (input.replaceFileId) return initReplaceSession(userId, { ...input, replaceFileId: input.replaceFileId });
+
   const name = normalizeName(input.targetName);
 
   if (input.targetFolderId) {
@@ -53,9 +68,48 @@ export async function initUploadSession(
       // MinIO's low-level multipart API, so there's no separate provider-issued id to store.
       total_parts: Math.max(1, input.totalParts),
       expires_at: expiresAt,
+      checksum: input.checksum ?? null,
     },
   });
 
+  return { uploadSessionId: id, expiresAt };
+}
+
+/**
+ * A session that replaces an existing file's content (sync clients pushing a local edit). The
+ * destination is the file itself, so there's no name/path check; the target folder and name are
+ * recorded only for display. The compare-and-swap is checked here too, so a client that's already
+ * behind finds out before sending any bytes — and again at completion, where it actually counts.
+ */
+async function initReplaceSession(
+  userId: string,
+  input: { replaceFileId: string; totalParts: number; expectedVersion?: string; checksum?: string },
+) {
+  if (!(await checkPermission(userId, "file", input.replaceFileId, "editor"))) throw fileNotFound();
+  const file = await db.files.findFirst({
+    where: { id: input.replaceFileId, deleted_at: null, upload_status: "complete" },
+  });
+  if (!file) throw fileNotFound();
+  if (input.expectedVersion !== undefined && contentVersion(file.storage_key) !== input.expectedVersion) {
+    throw contentConflict();
+  }
+
+  const id = randomUUID();
+  const expiresAt = new Date(Date.now() + config.uploadSessionTtlMinutes * 60 * 1000);
+  await db.upload_sessions.create({
+    data: {
+      id,
+      user_id: userId,
+      target_folder_id: file.folder_id,
+      target_name: file.name,
+      minio_upload_id: id,
+      total_parts: Math.max(1, input.totalParts),
+      expires_at: expiresAt,
+      replace_file_id: file.id,
+      expected_version: input.expectedVersion ?? null,
+      checksum: input.checksum ?? null,
+    },
+  });
   return { uploadSessionId: id, expiresAt };
 }
 
@@ -153,7 +207,7 @@ export async function uploadPart(
  * the client can retry or cancel); a DB failure removes the composed object and aborts the
  * session with a refund.
  */
-export async function completeUpload(userId: string, sessionId: string, mimeType: string) {
+export async function completeUpload(userId: string, sessionId: string, requestedMimeType?: string) {
   const claimed = await db.upload_sessions.updateMany({
     where: { id: sessionId, user_id: userId, status: "pending" },
     data: { status: "complete" },
@@ -192,6 +246,11 @@ export async function completeUpload(userId: string, sessionId: string, mimeType
     }
   }
 
+  if (session.replace_file_id) {
+    return completeReplace(userId, session, parts, requestedMimeType, releaseClaim);
+  }
+  const mimeType = requestedMimeType ?? "application/octet-stream";
+
   try {
     await assertUploadDestinationStillValid(session);
   } catch (err) {
@@ -222,6 +281,7 @@ export async function completeUpload(userId: string, sessionId: string, mimeType
           mime_type: mimeType,
           storage_key: storageKey,
           upload_status: "complete",
+          checksum: session.checksum,
         },
       });
       // DESIGN.md §3.6: exactly one owner PERMISSIONS row, inserted with the file itself — same
@@ -254,6 +314,138 @@ export async function completeUpload(userId: string, sessionId: string, mimeType
   await logActivity({ actorId: userId, subjectUserId: userId, itemType: "file", itemId: file.id, action: "upload" });
 
   return file;
+}
+
+type ClaimedSession = Awaited<ReturnType<typeof db.upload_sessions.findUniqueOrThrow>>;
+
+/**
+ * completeUpload for a replace session: compose the new object, then in ONE transaction swap it
+ * into the existing FILES row (compare-and-swap on the content version), settle quota, and queue the old
+ * object (and its thumbnail) for removal. The row keeps its id, name, folder, owner, shares,
+ * tags and favorites — only the content changes.
+ *
+ * Quota: storage_used_bytes counts the bytes of the files a user owns, and the parts were charged
+ * to the uploader as they arrived. When the uploader owns the file, the old size is simply
+ * credited back now (supabase/migrations/0029: no version history, so the old bytes stop counting
+ * immediately). When an editor replaces someone else's file, the editor is refunded the new size
+ * and the owner is charged the difference — checked against the owner's quota.
+ */
+async function completeReplace(
+  userId: string,
+  session: ClaimedSession,
+  parts: { size_bytes: bigint }[],
+  requestedMimeType: string | undefined,
+  releaseClaim: () => Promise<unknown>,
+) {
+  const fileId = session.replace_file_id!;
+  if (!(await checkPermission(userId, "file", fileId, "editor"))) {
+    await abortClaimedSession(userId, session, "complete");
+    throw uploadSessionInvalid();
+  }
+
+  const newSize = parts.reduce((sum, p) => sum + p.size_bytes, 0n);
+  const storageKey = storage.generateStorageKey();
+  try {
+    await storage.completeMultipartUpload(session.id, session.total_parts, storageKey);
+  } catch (err) {
+    await storage.removeObject(storageKey).catch(() => undefined);
+    await releaseClaim();
+    throw err;
+  }
+
+  let file;
+  try {
+    file = await db.$transaction(async (tx) => {
+      const [current] = await tx.$queryRaw<
+        {
+          owner_id: string;
+          size_bytes: bigint;
+          storage_key: string;
+          thumbnail_key: string | null;
+          checksum: string | null;
+          mime_type: string;
+          deleted_at: Date | null;
+        }[]
+      >`
+        SELECT owner_id, size_bytes, storage_key, thumbnail_key, checksum, mime_type, deleted_at
+        FROM files WHERE id = ${fileId}::uuid FOR UPDATE
+      `;
+      if (!current || current.deleted_at !== null) throw contentConflict();
+      if (session.expected_version !== null && contentVersion(current.storage_key) !== session.expected_version) {
+        throw contentConflict();
+      }
+
+      if (current.owner_id === userId) {
+        await adjustUsage(tx, userId, -current.size_bytes);
+      } else {
+        await adjustUsage(tx, userId, -newSize);
+        const ownerDelta = newSize - current.size_bytes;
+        if (ownerDelta > 0n) {
+          if (!(await tryCreditQuota(current.owner_id, ownerDelta, tx))) throw quotaExceeded();
+        } else if (ownerDelta < 0n) {
+          await adjustUsage(tx, current.owner_id, ownerDelta);
+        }
+      }
+
+      const updated = await tx.files.update({
+        where: { id: fileId },
+        data: {
+          storage_key: storageKey,
+          size_bytes: newSize,
+          checksum: session.checksum,
+          mime_type: requestedMimeType ?? current.mime_type,
+          thumbnail_status: "none",
+          thumbnail_key: null,
+        },
+      });
+
+      await tx.deletion_queue.create({
+        data: {
+          item_type: "file",
+          item_id: randomUUID(),
+          storage_key: current.storage_key,
+          thumbnail_key: current.thumbnail_key,
+          owner_id: null,
+          size_bytes: 0n,
+          blob_only: true,
+        },
+      });
+      await tx.upload_sessions.update({ where: { id: session.id }, data: { file_id: fileId } });
+      return updated;
+    });
+  } catch (err) {
+    await storage.removeObject(storageKey).catch(() => undefined);
+    await abortClaimedSession(userId, session, "complete");
+    throw err;
+  }
+
+  if (isThumbnailable(file.mime_type)) {
+    file.thumbnail_status = "pending";
+  }
+  await enqueueThumbnail(file.id, file.mime_type);
+
+  await logActivity({
+    actorId: userId,
+    subjectUserId: file.owner_id,
+    itemType: "file",
+    itemId: file.id,
+    action: "upload",
+    metadata: { replaced: true },
+  });
+
+  return file;
+}
+
+/**
+ * Unconditional usage adjustment, for credits and for moving an already-paid-for charge between
+ * users. Unlike tryCreditQuota there's no quota condition: a credit must land even for a user who
+ * is over quota (an admin lowered it), or it would be silently lost.
+ */
+async function adjustUsage(client: Prisma.TransactionClient, userId: string, delta: bigint) {
+  if (delta === 0n) return;
+  await client.$executeRaw`
+    UPDATE users SET storage_used_bytes = storage_used_bytes + ${delta} WHERE id = ${userId}::uuid
+  `;
 }
 
 export async function cancelUpload(userId: string, sessionId: string) {
