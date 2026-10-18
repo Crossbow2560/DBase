@@ -75,6 +75,10 @@ export const config = {
   // REQUIREMENTS.md §5.4: an item is automatically purged 30 days after its own trashing time.
   trashRetentionDays: Number(process.env.TRASH_RETENTION_DAYS ?? 30),
 
+  // Sync change log (supabase/migrations/0028): events older than this are pruned, and a client
+  // whose cursor predates the pruned range re-reads the full tree (410 CURSOR_EXPIRED).
+  syncEventRetentionDays: Number(process.env.SYNC_EVENT_RETENTION_DAYS ?? 60),
+
   minio: (() => {
     const endpoint = parseEndpoint(process.env.MINIO_ENDPOINT ?? "localhost");
     // Real bug, found by actually loading a thumbnail in a browser rather than only verifying

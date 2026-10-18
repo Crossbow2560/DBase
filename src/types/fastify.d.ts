@@ -1,5 +1,16 @@
 import "fastify";
-import type { sessions, users } from "@prisma/client";
+import type { users } from "@prisma/client";
+
+/**
+ * The authenticated caller, set by accounts/guards.ts requireSession. `id` is the sessions row id
+ * for a cookie login, or the device_tokens row id for a device token.
+ */
+export interface AuthSession {
+  id: string;
+  user_id: string;
+  user: users;
+  kind: "cookie" | "device";
+}
 
 declare module "fastify" {
   interface FastifyContextConfig {
@@ -13,8 +24,9 @@ declare module "fastify" {
   }
 
   interface FastifyRequest {
-    session?: sessions & { user: users };
+    session?: AuthSession;
     rawSessionToken?: string;
+    rawDeviceToken?: string;
     // Set by the inbound-email plugin's own JSON body parser — the exact bytes Resend signed,
     // needed for Svix signature verification before the parsed body is trusted.
     rawBody?: string;

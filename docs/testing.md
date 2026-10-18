@@ -40,8 +40,29 @@ npm run test:db:down        # optional
 | `recent-files.test.ts` | nested files at any depth with locations, ordering, default limit and bounds, trashed and other users' trees excluded, renames count as changes |
 | `bootstrap-admin.test.ts` | the bootstrap script refuses `--password`, needs a TTY or `BOOTSTRAP_ADMIN_PASSWORD`, creates a working admin |
 | `secure-cookie.test.ts` | `Secure` cookies for an `https://` `PUBLIC_APP_URL` |
+| `device-tokens.test.ts` | bearer auth on existing routes (uploads included), hashed storage, no credential management with a token, revocation by DELETE / logout / password change / deactivation |
+| `sync.test.ts` | `/sync/tree` (subtree, paging, roles, access), `/sync/changes` (every event kind in order, `move_in`/`move_out`, trashed subtrees, shared roots, paging, a cursor never skipping an out-of-order commit, `410` after pruning), batched download URLs (one audit row per owner) and moves |
+| `replace-content.test.ts` | checksums recorded; replace in place (same id, quota credited back at once, old object removed by the worker); `expectedVersion` compare-and-swap at init and completion; trashed-meanwhile conflict; editor vs owner quota; viewers refused; `update` events |
 
 Test files run in parallel (`--test-concurrency=4`), each in its own process and database.
+
+## Sync client tests
+
+```bash
+cd sync-cli
+npm test            # unit: the reconcile decision table, filename rules, ignore patterns
+npm run test:e2e    # needs `npm run test:db:up` in the repo root
+```
+
+`sync-cli/test/e2e.test.ts` reuses the server's integration harness, but listens on a real port. It drives two simulated devices (each with its own state database and folder) plus the "web" side through the API. It covers:
+
+- one-way sync down and up, including empty and multi-part files
+- edits in both directions, conflicts that keep both versions, and a first sync into a folder that already has the same files
+- local deletes that stay local, a locally deleted folder, remote trash detaching the local copy, restore and reattach
+- local and remote moves keeping the item's id
+- viewer and editor roots
+- Windows filename rules (forced on Linux)
+- the CLI as a subprocess, and the daemon's watcher
 
 ## Strategy
 

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { config } from "../../config.js";
-import { requireSession, unauthenticatedRateLimit } from "./guards.js";
+import { requireCookieSession, requireSession, unauthenticatedRateLimit } from "./guards.js";
+import * as deviceTokens from "./device-token-service.js";
 import * as accounts from "./service.js";
 import * as lifecycle from "../lifecycle/lifecycle-service.js";
 
@@ -121,7 +122,7 @@ export async function accountRoutes(app: FastifyInstance) {
   app.post(
     "/api/v1/auth/change-password",
     {
-      preHandler: requireSession,
+      preHandler: requireCookieSession,
       schema: {
         body: {
           type: "object",
@@ -139,27 +140,70 @@ export async function accountRoutes(app: FastifyInstance) {
 
   // REQUIREMENTS.md §5.1.1: self-service deletion — always uses the default reassignment
   // policy (lifecycle-service.deleteAccount enforces this regardless of what's passed here).
-  app.delete("/api/v1/users/me", { preHandler: requireSession }, async (request, reply) => {
+  app.delete("/api/v1/users/me", { preHandler: requireCookieSession }, async (request, reply) => {
     const userId = request.session!.user_id;
     await lifecycle.deleteAccount(userId, userId);
     reply.clearCookie(config.sessionCookieName, { path: "/" });
     reply.code(204).send();
   });
 
+  // Logging out with a device token revokes that token — how `dbase-sync logout` signs a device out.
   app.post("/api/v1/auth/logout", { preHandler: requireSession }, async (request, reply) => {
+    if (request.session!.kind === "device") {
+      await deviceTokens.revokeDeviceTokenByRaw(request.rawDeviceToken!);
+      reply.code(204).send();
+      return;
+    }
     await accounts.logout(request.rawSessionToken!);
     reply.clearCookie(config.sessionCookieName, { path: "/" });
     reply.code(204).send();
   });
 
-  app.get("/api/v1/auth/sessions", { preHandler: requireSession }, async (request, reply) => {
+  // Device tokens (supabase/migrations/0027): managed only from a browser login, so a leaked token
+  // can't mint more tokens or revoke the user's other devices.
+  app.post(
+    "/api/v1/auth/device-tokens",
+    {
+      preHandler: requireCookieSession,
+      config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+      schema: {
+        body: {
+          type: "object",
+          required: ["name"],
+          properties: { name: { type: "string", minLength: 1, maxLength: 100 } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { name } = request.body as { name: string };
+      const created = await deviceTokens.createDeviceToken(request.session!.user_id, name);
+      reply.code(201).send({ deviceToken: created });
+    },
+  );
+
+  app.get("/api/v1/auth/device-tokens", { preHandler: requireCookieSession }, async (request, reply) => {
+    const tokens = await deviceTokens.listDeviceTokens(request.session!.user_id);
+    reply.send({ deviceTokens: tokens });
+  });
+
+  app.delete(
+    "/api/v1/auth/device-tokens/:tokenId",
+    { preHandler: requireCookieSession },
+    async (request, reply) => {
+      const { tokenId } = request.params as { tokenId: string };
+      await deviceTokens.revokeDeviceToken(request.session!.user_id, tokenId);
+      reply.code(204).send();
+    },
+  );
+
+  app.get("/api/v1/auth/sessions", { preHandler: requireCookieSession }, async (request, reply) => {
     const sessions = await accounts.listSessions(request.session!.user_id);
     reply.send({ sessions });
   });
 
   app.delete(
     "/api/v1/auth/sessions/:sessionId",
-    { preHandler: requireSession },
+    { preHandler: requireCookieSession },
     async (request, reply) => {
       const { sessionId } = request.params as { sessionId: string };
       await accounts.revokeSession(request.session!.user_id, sessionId);

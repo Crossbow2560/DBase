@@ -21,6 +21,7 @@ type DeletionQueueRow = {
   owner_id: string | null;
   size_bytes: bigint;
   attempts: number;
+  blob_only: boolean;
 };
 
 /**
@@ -167,7 +168,7 @@ async function claimBatch(limit: number): Promise<DeletionQueueRow[]> {
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, item_type, item_id, storage_key, thumbnail_key, owner_id, size_bytes, attempts
+    RETURNING id, item_type, item_id, storage_key, thumbnail_key, owner_id, size_bytes, attempts, blob_only
   `;
 }
 
@@ -184,6 +185,13 @@ async function processRow(row: DeletionQueueRow): Promise<void> {
   }
   if (row.thumbnail_key) {
     await storage.removeObject(row.thumbnail_key);
+  }
+
+  // An old object left behind by a content replace (upload-service.ts completeReplace): the FILES
+  // row lives on and quota was already settled, so removing the blobs is the whole job.
+  if (row.blob_only) {
+    await db.deletion_queue.update({ where: { id: row.id }, data: { status: "done", processed_at: new Date() } });
+    return;
   }
 
   await db.$transaction(async (tx) => {

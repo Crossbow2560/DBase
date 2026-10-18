@@ -6,6 +6,7 @@ import { generateToken, hashToken } from "../../lib/tokens.js";
 import { sendEmail } from "../../lib/email.js";
 import { renderEmailLayout } from "../../lib/emailTemplate.js";
 import { getDefaultUserQuotaBytes } from "./default-quota.js";
+import { revokeAllDeviceTokens } from "./device-token-service.js";
 import {
   registrationFailed,
   invalidCredentials,
@@ -290,6 +291,8 @@ export async function changePassword(
       where: { user_id: userId, revoked_at: null, id: { not: currentSessionId } },
       data: { revoked_at: new Date() },
     }),
+    // A password change is a "sign out my other devices" signal — sync clients included.
+    revokeAllDeviceTokens(userId),
   ]);
 }
 
@@ -420,5 +423,6 @@ export async function confirmPasswordReset(rawToken: string, newPassword: string
       where: { user_id: tokenRow.user_id, revoked_at: null },
       data: { revoked_at: new Date() },
     }),
+    revokeAllDeviceTokens(tokenRow.user_id),
   ]);
 }

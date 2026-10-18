@@ -13,13 +13,13 @@
 │   ├── migrate.ts                 # applies supabase/migrations/*.sql, tracks them in _migrations
 │   └── bootstrap-admin.ts         # creates the first admin (refuses if one exists)
 ├── supabase/
-│   └── migrations/                # 0001_foundation.sql … 0024_hash_share_link_tokens.sql
+│   └── migrations/                # 0001_foundation.sql … 0029_replace_file_content.sql
 ├── src/
 │   ├── app.ts                     # buildApp(): plugins, rate limits, error handler, routes
 │   ├── server.ts                  # listen + start workers
 │   ├── config.ts                  # env parsing (dotenv), MinIO internal vs public endpoints
 │   ├── db.ts                      # the single shared PrismaClient
-│   ├── types/fastify.d.ts         # request.session / rawSessionToken / rawBody augmentation
+│   ├── types/fastify.d.ts         # request.session (cookie or device token) / raw tokens / rawBody augmentation
 │   ├── lib/
 │   │   ├── password.ts (+ .test)  # bcrypt (12 rounds), 8-char minimum
 │   │   ├── tokens.ts (+ .test)    # 32-byte base64url tokens, SHA-256 hashing
@@ -27,8 +27,9 @@
 │   │   ├── emailTemplate.ts       # HTML email layout
 │   │   └── env.ts (+ .test)       # pure parsers: TRUST_PROXY, COOKIE_SECURE
 │   ├── modules/
-│   │   ├── accounts/              # auth, sessions, profile, storage usage; guards.ts (route preconditions)
-│   │   ├── filesystem/            # folders, files, uploads, name normalization
+│   │   ├── accounts/              # auth, sessions, device tokens, profile, storage usage; guards.ts (route preconditions)
+│   │   ├── filesystem/            # folders, files, uploads + content replace, content versions, name normalization
+│   │   ├── sync/                  # sync API: subtree snapshot, change feed, batch download URLs and moves
 │   │   ├── access/                # permission-check, grants, ownership transfer, share links
 │   │   ├── trash/                 # trash listing, restore, deletion queue
 │   │   ├── organize/              # favorites, tags
@@ -41,10 +42,21 @@
 │   └── workers/
 │       ├── upload-session-cleanup.ts
 │       ├── deletion-queue.ts
-│       └── thumbnail-queue.ts
+│       ├── thumbnail-queue.ts
+│       └── sync-events.ts         # sequences and prunes the sync change log
 ├── test/
 │   ├── integration/               # node:test suites against real Postgres + MinIO (harness.ts)
 │   └── preview/                   # seed + runner for a throwaway local environment
+├── sync-cli/                      # dbase-sync: two-way folder sync CLI/daemon (separate npm project)
+│   ├── src/
+│   │   ├── cli.ts                 # commands (login, add, run, status, conflicts, restore, reattach, …)
+│   │   ├── daemon.ts              # run loop: periodic passes + fs.watch triggers, single-instance lock
+│   │   ├── engine.ts              # one sync pass: pull, scan, moves by id, decide, transfer
+│   │   ├── reconcile.ts (+ .test) # the pure three-way decision table
+│   │   ├── state.ts               # node:sqlite state: roots, remote mirror, synced bases, issues, uploads
+│   │   ├── api.ts, transfer.ts    # typed API client with retries; resumable uploads, verified downloads
+│   │   └── scan.ts, names.ts, ignore.ts (+ .test)  # local scan, platform filename rules, .dbaseignore
+│   └── test/e2e.test.ts           # two devices against a real backend from the integration harness
 ├── web/                           # Next.js frontend (separate npm project)
 │   ├── Dockerfile                 # standalone build; BACKEND_URL is a build arg
 │   ├── next.config.js             # /api/v1/* rewrite to the backend, loads root .env

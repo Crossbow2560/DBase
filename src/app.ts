@@ -10,6 +10,7 @@ import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import { config } from "./config.js";
 import { AppError } from "./modules/accounts/errors.js";
+import { bearerDeviceToken } from "./modules/accounts/guards.js";
 import { accountRoutes } from "./modules/accounts/routes.js";
 import { filesystemRoutes } from "./modules/filesystem/routes.js";
 import { accessRoutes } from "./modules/access/routes.js";
@@ -18,6 +19,7 @@ import { organizeRoutes } from "./modules/organize/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { emailRoutes } from "./modules/email/routes.js";
 import { searchRoutes } from "./modules/search/routes.js";
+import { syncRoutes } from "./modules/sync/routes.js";
 
 /**
  * APPLICATION_DESIGN.md §4.7: per-authenticated-user for authenticated endpoints, per-IP for
@@ -30,6 +32,11 @@ import { searchRoutes } from "./modules/search/routes.js";
  * produces a stable (if meaningless) bucket, which is harmless for this purpose.
  */
 function rateLimitKey(request: FastifyRequest): string {
+  // A device token buckets the same way a cookie does: one bucket per token, i.e. per device.
+  const deviceToken = bearerDeviceToken(request);
+  if (deviceToken) {
+    return `device:${createHash("sha256").update(deviceToken).digest("hex")}`;
+  }
   const rawToken = request.cookies[config.sessionCookieName];
   if (rawToken) {
     return `session:${createHash("sha256").update(rawToken).digest("hex")}`;
@@ -163,6 +170,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   await app.register(adminRoutes);
   await app.register(emailRoutes);
   await app.register(searchRoutes);
+  await app.register(syncRoutes);
 
   app.get("/health", async () => ({ status: "ok" }));
 

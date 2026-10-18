@@ -9,7 +9,7 @@
 **Trade-off: exactly one backend instance is supported.** Running replicas is not a configuration option today, for two concrete reasons:
 
 - **Rate limits are per process.** `@fastify/rate-limit` uses its in-memory store, so N replicas would each allow the full budget — login brute-force protection, share-link unlock limits and the per-IP ceiling would all be N× weaker.
-- **Workers run in every process.** Each instance starts all three `setInterval` workers. Queue claims use `FOR UPDATE SKIP LOCKED` and session aborts use conditional updates, so duplicated workers stay *correct*, but they multiply database polling for no benefit.
+- **Workers run in every process.** Each instance starts all four `setInterval` workers. Queue claims use `FOR UPDATE SKIP LOCKED` and session aborts use conditional updates, so duplicated workers stay *correct*, but they multiply database polling for no benefit.
 
 Scaling out would mean a shared rate-limit store (`@fastify/rate-limit` supports Redis) and running workers in one dedicated process. Until then, scale vertically. The backend logs this constraint at startup.
 
@@ -128,3 +128,36 @@ Scaling out would mean a shared rate-limit store (`@fastify/rate-limit` supports
 
 - **Encryption:** MinIO SSE-S3 with a single KMS key from `MINIO_KMS_SECRET_KEY`. It is simple but has no key rotation, and objects written before it was enabled stay unencrypted.
 - **RLS:** enabled with zero policies (`0010`). This closes the Supabase auto-generated API. The app's own role bypasses RLS, so authorization stays in `checkPermission()`.
+
+## Folder sync: a trigger-written change feed with commit-ordered cursors
+
+**Decision:** triggers on `files`/`folders` write `sync_events`. A sequencer serialized by an advisory lock assigns `seq` to committed rows only, and clients resume from a `seq` cursor.
+
+**Why:** a client resuming from "the last thing I saw" needs a cursor that never skips anything. `updated_at` can't provide that (concurrent transactions commit out of timestamp order, and purged rows vanish), and a plain `bigserial` can't either (values are taken at insert, not commit). Numbering only committed rows, one sequencer at a time, makes `seq` order equal to visibility order. Triggers mean no write path can forget to log.
+
+**Trade-offs:** one extra insert per mutation, plus a short sequencer pass before each sync read. Events are pruned after `SYNC_EVENT_RETENTION_DAYS`, and an older cursor gets `410` and re-reads the tree.
+
+**Rejected:** a timestamp cursor with an overlap window (it trades missed events for duplicates and guesswork), and a global lock held from first write to commit (it would serialize every upload).
+
+## Device tokens for sync clients
+
+**Decision:** long-lived bearer tokens (`dbt_…`, stored hashed) that authenticate every normal route but can't manage credentials. `dbase-sync login` uses the password once, to mint a token, and then signs that session out.
+
+**Why:** cookie sessions expire after 30 days and logins are limited to 20 per 15 minutes per IP, which is fine for a browser but wrong for a daemon. Refusing credential management to tokens means a leaked token can't escalate. Password changes and resets, and deactivation, revoke all of a user's tokens, like sessions.
+
+## Content replace without version history; opaque content versions
+
+**Decision:** a replace swaps a file's `storage_key` in place, and the old object is deleted shortly after. The old bytes stop counting against quota immediately. Change detection and compare-and-swap use `version = sha256(storage_key)`, not `checksum`.
+
+**Why:**
+- Keeping the same file row preserves shares, tags, favorites and links.
+- Without versions, there's nothing to keep the old bytes for.
+- Checksums are client-supplied and the web client doesn't send them, so most files have none. The storage key changes exactly when the content does, and hashing it keeps the key itself private.
+- When an editor replaces someone else's file, the owner is charged the difference, because quota counts what a user owns.
+
+## Sync never propagates deletes
+
+**Decision:** deleting a file locally leaves it in DBase (`local_removed`, and it isn't downloaded again unless edited remotely). Trashing it in DBase leaves the local copy (`detached`, and it's never uploaded again unless the user runs `dbase-sync reattach`). When both sides changed, both versions are kept.
+
+**Why:** a sync client must never be the reason data is lost. An accidental delete on either side, or a confused client, can't take the other side's copy with it, and an edit always beats a delete. The cost is that intentional deletes have to be made on each side.
+
