@@ -4,9 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
+      # 127.0.0.1 on every service: the Cloudflare Tunnel reaches them on localhost, and
+      # Docker-published ports bypass ufw, so 0.0.0.0 exposes them to the LAN and to every other
+      # container on this machine (through its network gateway).
       # Both sides driven by the same var (root .env's PORT) — change it if 3000 is already taken
       # on this machine by something else. See .env.example.
-      - "${PORT:-3000}:${PORT:-3000}"
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
     # Every key in the root .env is passed straight through to the backend process. Compose's own
     # `.env` auto-load only does `${VAR}` substitution *into this file* — it does NOT put anything
     # inside the container; that needs env_file (whole file) or environment (named vars). With this
@@ -97,7 +100,7 @@ services:
     ports:
       # Both sides driven by the same var (root .env's FRONTEND_PORT) — change it if 3001 is
       # already taken on this machine. See .env.example.
-      - "${FRONTEND_PORT:-3001}:${FRONTEND_PORT:-3001}"
+      - "127.0.0.1:${FRONTEND_PORT:-3001}:${FRONTEND_PORT:-3001}"
     environment:
       # Runtime, unlike BACKEND_URL above — Next's standalone server.js reads this directly at
       # container start, so no rebuild needed just to change the port.
@@ -117,8 +120,8 @@ services:
     # above.
     command: server /data --address ":${MINIO_PORT:-9000}" --console-address ":${MINIO_CONSOLE_PORT:-9001}"
     ports:
-      - "${MINIO_PORT:-9000}:${MINIO_PORT:-9000}" # S3 API
-      - "${MINIO_CONSOLE_PORT:-9001}:${MINIO_CONSOLE_PORT:-9001}" # web console
+      - "127.0.0.1:${MINIO_PORT:-9000}:${MINIO_PORT:-9000}" # S3 API
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:${MINIO_CONSOLE_PORT:-9001}" # web console
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -184,7 +187,7 @@ services:
       POSTGRES_PASSWORD: dbase_test
       POSTGRES_DB: postgres
     ports:
-      - "${TEST_DB_PORT:-54329}:5432"
+      - "127.0.0.1:${TEST_DB_PORT:-54329}:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
@@ -201,7 +204,7 @@ services:
       MINIO_ROOT_USER: dbase_test
       MINIO_ROOT_PASSWORD: dbase_test_secret
     ports:
-      - "${TEST_MINIO_PORT:-59000}:9000"
+      - "127.0.0.1:${TEST_MINIO_PORT:-59000}:9000"
     tmpfs:
       - /data
     healthcheck:
